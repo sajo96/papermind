@@ -47,3 +47,9 @@ PaperMind leverages:
 - **FastAPI / Python (3.12)**: Core ingestion and API routing mechanics.
 - **Watchdog**: Background daemon integrated directly into the FastAPI lifecycle for native file system event monitoring.
 - **SurrealDB**: Advanced multi-model database persisting `WatchedFolder`, `AcademicPaper`, `Atom`, and `Concept` entities linked with standard notebooks.
+
+## Acknowledgements & Credits
+
+This project is built on top of and heavily borrows from the excellent **[Open Notebook](https://github.com/nutlope/open_notebook)** project. Full credit goes to the original authors for the foundational architecture, ingestion mechanics, and UI.
+
+🤖 **Disclaimer**: This project is proudly **vibecoded (AI slop)**. Built entirely via AI coding assistants. Proceed with caution and expect whimsical architecture choices!
