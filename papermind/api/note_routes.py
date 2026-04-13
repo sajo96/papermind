@@ -64,7 +64,7 @@ async def generate_note(request: GenerateNoteRequest) -> dict:
 
 @router.get("/note/{paper_id}")
 async def get_note_for_paper(paper_id: str):
-    paper_id_full = f"academic_paper:{paper_id}" if not paper_id.startswith("academic_paper:") else paper_id
+    paper_id_full = paper_id if ":" in paper_id else f"academic_paper:{paper_id}"
     try:
         existing_note_query = await repo_query(
             "SELECT out.* FROM type::thing($id)->refer FETCH out", 

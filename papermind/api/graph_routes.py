@@ -59,8 +59,8 @@ async def get_notebook_graph(
         WHERE source_id.notebook_id = $notebook_id
         """
         
-        # Build query conditionals
-        conditions = ["source_id.notebook_id = $notebook_id"]
+        # Build query conditionals for academic papers
+        conditions = ["source_id IN (SELECT VALUE in FROM reference WHERE out = $notebook_id)"]
         if year_from is not None:
             conditions.append(f"year >= {year_from}")
         if year_to is not None:
@@ -70,7 +70,7 @@ async def get_notebook_graph(
         
         query = f"""
         SELECT
-          id, title, authors, year, doi,
+          id, source_id, title, authors, year, doi,
           (SELECT id, section_label FROM atom WHERE paper_id = $parent.id) AS atoms,
           ->cites->academic_paper AS cited_papers,
           ->tagged_with.out AS concepts
@@ -80,6 +80,15 @@ async def get_notebook_graph(
 
         papers_result = await repo_query(query, {"notebook_id": nb_id})
         papers = papers_result[0] if papers_result and len(papers_result) > 0 else []
+
+        # Find plain sources (in case they weren't parsed into academic_paper)
+        sources_query = """
+        SELECT id, title, (SELECT count() FROM source_embedding WHERE source = $parent.id) as chunk_count
+        FROM source 
+        WHERE id IN (SELECT VALUE in FROM reference WHERE out = $notebook_id)
+        """
+        plain_sources_result = await repo_query(sources_query, {"notebook_id": nb_id})
+        plain_sources = plain_sources_result[0] if plain_sources_result and len(plain_sources_result) > 0 else []
 
         if concept_filter:
             # If concept filter is applied, only keep papers that have the specified concept
@@ -98,6 +107,7 @@ async def get_notebook_graph(
         concept_count = 0
 
         # Construct nodes and basic structural edges
+        # Add academic papers
         for p in papers:
             paper_id = p.get("id")
             if not paper_id:
@@ -150,6 +160,25 @@ async def get_notebook_graph(
             if cites_list:
                 for cited in cites_list:
                     edges.append(GraphEdge(source=paper_id, target=cited, type="cites", weight=1.0))
+
+        # Add plain sources as papers if they aren't already represented by an academic_paper
+        parsed_source_ids = {p.get("source_id") for p in papers if p.get("source_id")}
+        for s in plain_sources:
+            s_id = s.get("id")
+            if not s_id or s_id in parsed_source_ids:
+                continue
+            
+            nodes_dict[s_id] = GraphNode(
+                id=s_id,
+                type="paper", # Treat plain source as paper
+                label=s.get("title", "Unknown Source"),
+                year=None,
+                authors=[],
+                doi=None,
+                atom_count=s.get("chunk_count") or 0,
+                concepts=[]
+            )
+            paper_count += 1
             
             # Atom Nodes & contains edges
             # Usually we don't return all atoms as graph nodes globally unless necessary, 
@@ -176,6 +205,20 @@ async def get_notebook_graph(
                     target=se["target"],
                     type="similar_to",
                     weight=se["weight"]
+                ))
+                
+        # Generate basic connectivity between plain sources if they reside in the same notebook 
+        # (Since standard `source` nodes don't get `similar_to` atom edges by default without parsing)
+        plain_source_ids = [s.get("id") for s in plain_sources if s.get("id") not in parsed_source_ids]
+        import itertools
+        if len(plain_source_ids) > 1:
+            for s1, s2 in itertools.combinations(plain_source_ids, 2):
+                # Create a baseline conceptual edge so standalone documents cluster together slightly
+                edges.append(GraphEdge(
+                    source=s1,
+                    target=s2,
+                    type="similar_to",
+                    weight=0.5
                 ))
         
         return GraphResponse(
