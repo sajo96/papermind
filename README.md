@@ -1,6 +1,5 @@
 <div align="center">
   <img src="logo.png" alt="PaperMind Logo" width="250" />
-  <h1>PaperMind</h1>
   <p>Automated Academic Knowledge Graph & PDF Digestion</p>
 </div>
 
