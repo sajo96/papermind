@@ -296,8 +296,9 @@ app.include_router(credentials.router, prefix="/api", tags=["credentials"])
 app.include_router(languages.router, prefix="/api", tags=["languages"])
 
 # Custom PaperMind additions
-from papermind.api import watcher_routes
+from papermind.api import watcher_routes, parser_routes
 app.include_router(watcher_routes.router, prefix="/api", tags=["papermind-watcher"])
+app.include_router(parser_routes.router, prefix="/api", tags=["papermind-parser"])
 
 
 
