@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
+import ast
+import json
 import re
 
 from papermind.models import AcademicPaper
@@ -62,6 +64,64 @@ def _extract_section_block(content: str, start_header: str, end_headers: list[st
     return content[start:end].strip()
 
 
+def _parse_loose_mapping(raw: str) -> Optional[dict]:
+    text = (raw or "").strip()
+    if not text:
+        return None
+
+    candidates = [text]
+    if text.startswith('"') and text.endswith('"'):
+        candidates.append(text[1:-1])
+
+    for candidate in candidates:
+        normalized = candidate.strip()
+        if not normalized.startswith("{"):
+            continue
+
+        try:
+            parsed = json.loads(normalized)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+        try:
+            parsed = ast.literal_eval(normalized)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+    return None
+
+
+def _coerce_text_field(raw: str, preferred_keys: list[str]) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+
+    mapping = _parse_loose_mapping(text)
+    if not mapping:
+        return text
+
+    lowered = {str(k).strip().lower(): v for k, v in mapping.items()}
+    for key in preferred_keys:
+        value = lowered.get(key.lower())
+        if value is None:
+            continue
+        cleaned = str(value).strip()
+        if cleaned:
+            return cleaned
+
+    # Fallback: return first non-empty value from the mapping.
+    for value in mapping.values():
+        cleaned = str(value).strip()
+        if cleaned:
+            return cleaned
+
+    return text
+
+
 def _parse_ai_note_content(note_obj: dict) -> dict:
     """Convert markdown note content into the structured fields expected by the PaperPanel."""
     if not isinstance(note_obj, dict):
@@ -72,23 +132,37 @@ def _parse_ai_note_content(note_obj: dict) -> dict:
         return _json_safe(note_obj)
 
     summary_match = re.search(r"\*\*Summary\*\*:\s*(.*)", content)
-    one_line_summary = summary_match.group(1).strip() if summary_match else ""
+    one_line_summary_raw = summary_match.group(1).strip() if summary_match else ""
+    one_line_summary = _coerce_text_field(
+        one_line_summary_raw,
+        ["one_line_summary", "summary", "abstract", "result"],
+    )
 
     key_findings_block = _extract_section_block(
         content,
         "## Key Findings",
         ["## Methodology", "## Limitations", "**Concepts**:"],
     )
-    key_findings = [
-        line[2:].strip()
-        for line in key_findings_block.splitlines()
-        if line.strip().startswith("-")
-    ]
+    key_findings = []
+    for line in key_findings_block.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("-"):
+            continue
+        key_findings.append(
+            _coerce_text_field(
+                stripped[2:].strip(),
+                ["finding", "key_finding", "result", "summary"],
+            )
+        )
 
-    methodology = _extract_section_block(
+    methodology_raw = _extract_section_block(
         content,
         "## Methodology",
         ["## Limitations", "**Concepts**:"],
+    )
+    methodology = _coerce_text_field(
+        methodology_raw,
+        ["methodology", "methods", "approach", "dataset", "experimental_setup"],
     )
 
     limitations_block = _extract_section_block(
@@ -96,11 +170,17 @@ def _parse_ai_note_content(note_obj: dict) -> dict:
         "## Limitations",
         ["**Concepts**:"],
     )
-    limitations = [
-        line[2:].strip()
-        for line in limitations_block.splitlines()
-        if line.strip().startswith("-")
-    ]
+    limitations = []
+    for line in limitations_block.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("-"):
+            continue
+        limitations.append(
+            _coerce_text_field(
+                stripped[2:].strip(),
+                ["limitation", "limitations", "risk", "caveat"],
+            )
+        )
 
     concepts_match = re.search(r"\*\*Concepts\*\*:\s*(.*)", content)
     concepts_raw = concepts_match.group(1).strip() if concepts_match else ""
