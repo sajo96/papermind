@@ -22,30 +22,20 @@ class WatchResponse(BaseModel):
     active: bool
     created_at: str
 
+
+class ActionResponse(BaseModel):
+    status: str
+    message: str
+
 @router.post("", response_model=WatchResponse)
 async def add_watched_folder(req: WatchRequest, background_tasks: BackgroundTasks):
     """Add a new watched folder to the database and start the watcher."""
     try:
-        # Check if already exists
-        existing = await WatchedFolder.get_all()
-        for f in existing:
-            if f.path == req.path:
-                # Instead of erroring out immediately, let's clean up inactive or old records if they overlap.
-                # Since we changed DELETE to actually delete, there shouldn't be valid overlapping active ones.
-                logger.info(f"Cleaning up existing watcher for {req.path}")
-                watcher_instance.remove_folder_watch(f.path)
-                await f.delete()
-                
-        folder = WatchedFolder(
-            path=req.path,
-            notebook_id=req.notebook_id,
-            recursive=req.recursive,
-            active=True
+        folder = await watcher_instance.add_folder(
+            req.path,
+            req.notebook_id,
+            req.recursive,
         )
-        await folder.save()
-        
-        # Start immediately in the background
-        watcher_instance.add_folder_watch(folder.path, folder.notebook_id, folder.recursive)
         
         return WatchResponse(
             id=folder.id,
@@ -53,7 +43,11 @@ async def add_watched_folder(req: WatchRequest, background_tasks: BackgroundTask
             notebook_id=folder.notebook_id,
             recursive=folder.recursive,
             active=folder.active,
-            created_at=folder.created.isoformat() if hasattr(folder, 'created') and folder.created else ""
+            created_at=(
+                folder.created_at.isoformat()
+                if getattr(folder, "created_at", None)
+                else (folder.created.isoformat() if hasattr(folder, "created") and folder.created else "")
+            ),
         )
     except HTTPException:
         raise
@@ -62,18 +56,18 @@ async def add_watched_folder(req: WatchRequest, background_tasks: BackgroundTask
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/{folder_id}")
+@router.delete("/{folder_id}", response_model=ActionResponse)
 async def remove_watched_folder(folder_id: str):
     """Remove a watched folder from DB and stop its watcher."""
     try:
-        folder = await WatchedFolder.get(folder_id)
+        folder = await watcher_instance.remove_folder(folder_id)
         if not folder:
             raise HTTPException(status_code=404, detail="Folder not found")
-            
-        watcher_instance.remove_folder_watch(folder.path)
-        await folder.delete()
         
-        return {"status": "success", "message": f"Stopped watching {folder.path}"}
+        return ActionResponse(
+            status="success",
+            message=f"Stopped watching {folder.path}",
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -93,7 +87,11 @@ async def list_watched_folders():
                 notebook_id=f.notebook_id,
                 recursive=f.recursive,
                 active=f.active,
-                created_at=f.created.isoformat() if hasattr(f, 'created') and f.created else ""
+                created_at=(
+                    f.created_at.isoformat()
+                    if getattr(f, "created_at", None)
+                    else (f.created.isoformat() if hasattr(f, "created") and f.created else "")
+                ),
             ) for f in folders
         ]
     except Exception as e:
@@ -101,7 +99,7 @@ async def list_watched_folders():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{folder_id}/scan")
+@router.post("/{folder_id}/scan", response_model=ActionResponse)
 async def trigger_scan(folder_id: str, background_tasks: BackgroundTasks):
     """Manually trigger a full scan of the folder and process existing PDFs."""
     from pathlib import Path
@@ -125,7 +123,10 @@ async def trigger_scan(folder_id: str, background_tasks: BackgroundTasks):
                 await asyncio.sleep(1) # stagger logic
                 
         background_tasks.add_task(process_all_pdfs)
-        return {"status": "success", "message": f"Scan queued for {len(pdfs)} files in {folder.path}"}
+        return ActionResponse(
+            status="success",
+            message=f"Scan queued for {len(pdfs)} files in {folder.path}",
+        )
         
     except HTTPException:
         raise

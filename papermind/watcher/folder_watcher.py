@@ -10,6 +10,7 @@ from watchdog.events import FileCreatedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from open_notebook.config import UPLOADS_FOLDER
+from open_notebook.database.repository import ensure_record_id, repo_query
 from api.routers.sources import generate_unique_filename
 from papermind.models import WatchedFolder
 
@@ -66,6 +67,29 @@ async def ingest_pdf(pdf_path: str, notebook_id: str):
     md5_hash = await get_file_md5(pdf_path)
     logger.debug(f"File {pdf_path} stabilized with hash {md5_hash}")
 
+    # Deduplicate by file hash within the same notebook.
+    try:
+        duplicate_result = await repo_query(
+            """
+            SELECT id
+            FROM source
+            WHERE file_hash = $file_hash
+              AND id IN (SELECT VALUE in FROM reference WHERE out = $notebook_id)
+            LIMIT 1
+            """,
+            {
+                "file_hash": md5_hash,
+                "notebook_id": ensure_record_id(notebook_id),
+            },
+        )
+        if duplicate_result and len(duplicate_result) > 0:
+            logger.info(
+                f"Skipping duplicate PDF {pdf_path}; matching source: {duplicate_result[0].get('id')}"
+            )
+            return
+    except Exception as e:
+        logger.warning(f"Could not run dedup query for {pdf_path}: {e}")
+
     # Use port 5055 by default since this might run in the background worker or fastapi app
     API_BASE = os.environ.get("PAPERMIND_API_BASE", "http://localhost:5055")
 
@@ -108,6 +132,18 @@ async def ingest_pdf(pdf_path: str, notebook_id: str):
         if not source_id:
             logger.error(f"Could not extract source_id from API response: {data}")
             return
+
+        # Persist MD5 hash on source for future dedup checks.
+        try:
+            await repo_query(
+                "UPDATE type::thing($source_id) MERGE { file_hash: $file_hash }",
+                {
+                    "source_id": source_id,
+                    "file_hash": md5_hash,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to save file_hash for source {source_id}: {e}")
 
         logger.info(
             f"Successfully ingested source {source_id}. Waiting for processing..."
@@ -204,12 +240,45 @@ class FolderWatcher:
         self._observers[path] = observer
         logger.info(f"Started watching folder: {path} for notebook: {notebook_id}")
 
+    async def add_folder(self, path: str, notebook_id: str, recursive: bool):
+        """Insert or reactivate watched folder in DB and start its observer."""
+        existing = await WatchedFolder.get_all()
+        for folder in existing:
+            if folder.path == path:
+                folder.notebook_id = notebook_id
+                folder.recursive = recursive
+                folder.active = True
+                await folder.save()
+                self.add_folder_watch(path, notebook_id, recursive)
+                return folder
+
+        folder = WatchedFolder(
+            path=path,
+            notebook_id=notebook_id,
+            recursive=recursive,
+            active=True,
+        )
+        await folder.save()
+        self.add_folder_watch(path, notebook_id, recursive)
+        return folder
+
     def remove_folder_watch(self, path: str):
         if path in self._observers:
             observer = self._observers.pop(path)
             observer.stop()
             observer.join()
             logger.info(f"Stopped watching folder: {path}")
+
+    async def remove_folder(self, folder_id: str):
+        """Mark watched folder inactive in DB and stop its observer."""
+        folder = await WatchedFolder.get(folder_id)
+        if not folder:
+            return None
+
+        self.remove_folder_watch(folder.path)
+        folder.active = False
+        await folder.save()
+        return folder
 
     async def stop(self):
         """Cleanly stops all observers."""

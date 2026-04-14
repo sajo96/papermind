@@ -1,4 +1,8 @@
 -- AcademicPaper: extends the existing source record with structured metadata
+DEFINE FIELD IF NOT EXISTS file_hash ON TABLE source TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS source_file_hash_idx ON TABLE source FIELDS file_hash;
+
+-- AcademicPaper: extends the existing source record with structured metadata
 DEFINE TABLE academic_paper SCHEMAFULL;
 DEFINE FIELD source_id       ON academic_paper TYPE record<source>;
 DEFINE FIELD title           ON academic_paper TYPE string;
