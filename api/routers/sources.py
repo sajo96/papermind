@@ -120,6 +120,48 @@ async def _find_duplicate_source_by_hash(
     return None
 
 
+async def _find_duplicate_source_by_file_contents(
+    file_hash: str, notebook_ids: list[str]
+) -> Optional[Source]:
+    if not notebook_ids:
+        return None
+
+    sources_result = await repo_query(
+        """
+        SELECT id, asset, title, topics, full_text, command
+        FROM source
+        WHERE id IN (SELECT VALUE in FROM reference WHERE out IN $notebook_ids)
+        """,
+        {"notebook_ids": [ensure_record_id(notebook_id) for notebook_id in notebook_ids]},
+    )
+
+    if not sources_result:
+        return None
+
+    for row in sources_result:
+        if not isinstance(row, dict):
+            continue
+
+        asset = row.get("asset") or {}
+        file_path = asset.get("file_path") if isinstance(asset, dict) else None
+        if not file_path:
+            continue
+
+        resolved_path = Path(file_path)
+        if not resolved_path.exists():
+            continue
+
+        try:
+            existing_hash = await get_file_md5(str(resolved_path))
+        except Exception:
+            continue
+
+        if existing_hash == file_hash:
+            return Source(**row)
+
+    return None
+
+
 async def save_uploaded_file(upload_file: UploadFile) -> str:
     """Save uploaded file to uploads folder and return file path."""
     if not upload_file.filename:
@@ -374,6 +416,11 @@ async def create_source(
                 uploaded_file_hash,
                 source_data.notebooks or [],
             )
+            if not duplicate_source:
+                duplicate_source = await _find_duplicate_source_by_file_contents(
+                    uploaded_file_hash,
+                    source_data.notebooks or [],
+                )
             if duplicate_source:
                 logger.info(
                     f"Skipping duplicate uploaded file {file_path}; matching source {duplicate_source.id}"
