@@ -168,6 +168,34 @@ class Notebook(ObjectModel):
                 {"notebook_id": notebook_id},
             )
 
+            # Remove notebook-specific watcher bindings (does not delete physical folders).
+            try:
+                watched_rows = await repo_query(
+                    "SELECT id, path FROM watched_folder WHERE notebook_id = $notebook_id",
+                    {"notebook_id": notebook_id},
+                )
+                for row in watched_rows or []:
+                    watched_id = row.get("id")
+                    if watched_id:
+                        await repo_query("DELETE $id", {"id": ensure_record_id(str(watched_id))})
+
+                # Stop active observers for removed bindings if watcher runtime is loaded.
+                try:
+                    from papermind.watcher.folder_watcher import watcher_instance
+
+                    for row in watched_rows or []:
+                        watched_path = row.get("path")
+                        if watched_path:
+                            watcher_instance.remove_folder_watch(str(watched_path))
+                except Exception as watcher_exc:
+                    logger.warning(
+                        f"Notebook {self.id}: watcher runtime cleanup skipped: {watcher_exc}"
+                    )
+            except Exception as watcher_delete_exc:
+                logger.warning(
+                    f"Notebook {self.id}: failed to remove watched_folder bindings: {watcher_delete_exc}"
+                )
+
             # 2. Handle sources
             if delete_exclusive_sources:
                 # Find sources with count of references to OTHER notebooks

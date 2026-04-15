@@ -19,14 +19,53 @@ export default function PaperPanel({
     onClose: () => void;
     onConceptClick: (cId: string) => void;
 }) {
+    const isPlaceholderText = (value: string | undefined | null) => {
+        const raw = String(value || "").trim().toLowerCase();
+        if (!raw) return true;
+        return (
+            raw.includes("methodology details unavailable") ||
+            raw.includes("limitations not explicitly stated") ||
+            raw === "n/a" ||
+            raw === "none"
+        );
+    };
+
+    const normalizeNotePayload = (payload: any) => {
+        const note = payload?.note ? payload.note : payload;
+        const methodology = !isPlaceholderText(note?.methodology) ? String(note?.methodology || "").trim() : "";
+
+        const limitationsRaw = Array.isArray(note?.limitations) ? note.limitations : [];
+        const limitations = limitationsRaw
+            .map((item: unknown) => String(item || "").trim())
+            .filter((item: string) => !isPlaceholderText(item));
+
+        return {
+            ...note,
+            methodology,
+            limitations,
+        };
+    };
+
     // Fetch detailed generated AI note for this paper using our API endpoint
     const internalPaperId = paperNode.id;
 
     const fetchPaperNote = async () => {
         const res = await fetch(`/api/papermind/note/${encodeURIComponent(internalPaperId)}`);
-        if (res.status === 404) return null;
+        if (res.status === 404) {
+            const generateRes = await fetch('/api/papermind/generate_note', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ paper_id: internalPaperId, regenerate: false }),
+            });
+            if (!generateRes.ok) return null;
+            const generatedPayload = await generateRes.json();
+            return normalizeNotePayload(generatedPayload);
+        }
         if (!res.ok) throw new Error("Failed to block note");
-        return res.json();
+        const payload = await res.json();
+        return normalizeNotePayload(payload);
     };
 
     const { data: aiNote, isLoading, error } = useQuery({
@@ -108,10 +147,12 @@ export default function PaperPanel({
                                     </ul>
                                 </div>
 
-                                <div>
-                                    <h4 className="font-semibold text-foreground border-b pb-1 mb-3">Methodology</h4>
-                                    <p className="text-muted-foreground leading-relaxed">{aiNote.methodology}</p>
-                                </div>
+                                {aiNote.methodology && (
+                                    <div>
+                                        <h4 className="font-semibold text-foreground border-b pb-1 mb-3">Methodology</h4>
+                                        <p className="text-muted-foreground leading-relaxed">{aiNote.methodology}</p>
+                                    </div>
+                                )}
 
                                 {aiNote.limitations && aiNote.limitations.length > 0 && (
                                     <div>

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { Button } from '@/components/ui/button'
@@ -13,6 +13,7 @@ import { FolderOpen, Loader2, Trash2, RotateCcw } from 'lucide-react'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
+import { pickNativeFolderPath } from '@/lib/native-folder-dialog'
 
 interface WatchedFolder {
     id: string
@@ -43,17 +44,41 @@ export function WatchedFolders({ notebookId }: WatchedFoldersProps) {
     const { t } = useTranslation()
     const queryClient = useQueryClient()
 
+    const textOrFallback = (value: unknown, fallback: string): string => {
+        if (typeof value !== 'string') return fallback
+        const normalized = value.trim()
+        if (!normalized) return fallback
+        // useTranslation returns key path for missing translations (e.g. "sources.folderPickerUnsupported").
+        if (/^[a-z0-9_.-]+$/i.test(normalized) && normalized.includes('.')) {
+            return fallback
+        }
+        return normalized
+    }
+
     const [path, setPath] = useState('')
+    const [pickerError, setPickerError] = useState<string | null>(null)
     const [recursive, setRecursive] = useState(false)
     const [addError, setAddError] = useState(false)
     const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
     const [scanningId, setScanningId] = useState<string | null>(null)
+    const folderInputRef = useRef<HTMLInputElement | null>(null)
+
+    const isAbsolutePath = (candidate: string): boolean => {
+        const normalized = candidate.trim()
+        return (
+            /^\//.test(normalized) ||
+            /^[A-Za-z]:[\\/]/.test(normalized) ||
+            /^\\\\/.test(normalized)
+        )
+    }
 
     // Fetch folders
     const { data: folders = [], isLoading, refetch } = useQuery({
         queryKey: ['watched-folders', notebookId],
         queryFn: () => {
-            return axios.get<WatchedFolder[]>('/api/papermind/watch').then(r => r.data)
+            return axios.get<WatchedFolder[]>('/api/papermind/watch', {
+                params: { notebook_id: notebookId },
+            }).then(r => r.data)
         },
     })
 
@@ -64,8 +89,12 @@ export function WatchedFolders({ notebookId }: WatchedFoldersProps) {
         onSuccess: () => {
             refetch()
             setPath('')
+            if (folderInputRef.current) {
+                folderInputRef.current.value = ''
+            }
             setRecursive(false)
             setAddError(false)
+            setPickerError(null)
             toast.success(t.sources.folderAdded || 'Folder added - watching for new PDFs.')
         },
         onError: (error) => {
@@ -107,6 +136,18 @@ export function WatchedFolders({ notebookId }: WatchedFoldersProps) {
     const handleAddFolder = () => {
         if (path.trim() === '') {
             setAddError(true)
+            setPickerError(null)
+            return
+        }
+
+        if (!isAbsolutePath(path)) {
+            setAddError(true)
+            setPickerError(
+                textOrFallback(
+                    t.sources.folderPathMustBeAbsolute,
+                    'Enter an absolute local path such as /Users/name/Documents/folder or C:\\Users\\name\\Documents\\folder.'
+                )
+            )
             return
         }
 
@@ -115,6 +156,26 @@ export function WatchedFolders({ notebookId }: WatchedFoldersProps) {
             notebook_id: notebookId,
             recursive,
         })
+    }
+
+    const handleBrowseFolder = async () => {
+        setAddError(false)
+        setPickerError(null)
+
+        const selectedPath = await pickNativeFolderPath()
+        if (!selectedPath) {
+            setPickerError(
+                textOrFallback(
+                    t.sources.folderPickerUnsupported,
+                    'Native folder picker is not available in this shell. Paste the full absolute path manually.'
+                )
+            )
+            folderInputRef.current?.focus()
+            return
+        }
+
+        setPath(selectedPath)
+        setAddError(false)
     }
 
     const handleScanFolder = async (id: string) => {
@@ -155,19 +216,39 @@ export function WatchedFolders({ notebookId }: WatchedFoldersProps) {
                     <Label htmlFor="folder-path" className="text-xs">
                         {t.sources.folderPath || 'Folder Path'}
                     </Label>
-                    <Input
-                        id="folder-path"
-                        type="text"
-                        placeholder="/path/to/your/papers/"
-                        value={path}
-                        onChange={(e) => {
-                            setPath(e.target.value)
-                            setAddError(false)
-                        }}
-                        disabled={addFolder.isPending}
-                        className="mt-1 text-sm"
-                    />
+                    <div className="mt-1 flex gap-2">
+                        <Input
+                            ref={folderInputRef}
+                            id="folder-path"
+                            type="text"
+                            placeholder="Paste an absolute local folder path"
+                            value={path}
+                            onChange={(event) => {
+                                setPath(event.target.value)
+                                setAddError(false)
+                                setPickerError(null)
+                            }}
+                            className="text-sm"
+                        />
+                        <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={handleBrowseFolder}
+                            disabled={addFolder.isPending}
+                        >
+                            <FolderOpen className="h-3 w-3 mr-1" />
+                            {t.common.browse || 'Browse'}
+                        </Button>
+                    </div>
                 </div>
+
+                <p className="text-xs text-muted-foreground">
+                    {textOrFallback(
+                        t.sources.folderPickerHint,
+                        'Use Browse only if your desktop context can expose an absolute path. Otherwise paste the full path manually.'
+                    )}
+                </p>
 
                 <div className="flex items-center gap-2">
                     <Checkbox
@@ -201,9 +282,9 @@ export function WatchedFolders({ notebookId }: WatchedFoldersProps) {
                 </Button>
 
                 {/* Inline feedback */}
-                {addError && (
-                    <p className="text-xs text-destructive">
-                        {t.sources.folderPathError || 'Folder not found. Check the path and try again.'}
+                {(addError || pickerError) && (
+                    <p className={cn('text-xs', addError ? 'text-destructive' : 'text-muted-foreground')}>
+                        {pickerError || t.sources.folderPathError || 'Folder not found. Check the path and try again.'}
                     </p>
                 )}
             </div>

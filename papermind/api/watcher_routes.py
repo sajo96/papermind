@@ -7,6 +7,13 @@ from loguru import logger
 from papermind.models import WatchedFolder
 from papermind.watcher.folder_watcher import watcher_instance
 
+
+def _normalize_notebook_id(notebook_id: str) -> str:
+    raw = str(notebook_id or "").strip()
+    if not raw:
+        raise ValueError("notebook_id is required")
+    return raw if ":" in raw else f"notebook:{raw}"
+
 router = APIRouter(prefix="/papermind/watch", tags=["papermind-watcher"])
 
 class WatchRequest(BaseModel):
@@ -79,9 +86,9 @@ async def remove_watched_folder(folder_id: str):
 async def list_watched_folders(notebook_id: Optional[str] = Query(None)):
     """List watched folders, optionally scoped to a specific notebook."""
     try:
-        folders = await WatchedFolder.get_all()
+        folders = [f for f in await WatchedFolder.get_all() if f.active]
         if notebook_id:
-            expected_notebook_id = notebook_id if ":" in notebook_id else f"notebook:{notebook_id}"
+            expected_notebook_id = _normalize_notebook_id(notebook_id)
             folders = [f for f in folders if str(f.notebook_id) == expected_notebook_id]
 
         return [
@@ -122,8 +129,9 @@ async def trigger_scan(folder_id: str, background_tasks: BackgroundTasks):
         pdfs = list(p.rglob("*.pdf") if folder.recursive else p.glob("*.pdf"))
         
         async def process_all_pdfs():
+            normalized_notebook_id = _normalize_notebook_id(str(folder.notebook_id))
             for pdf in pdfs:
-                await ingest_pdf(str(pdf), folder.notebook_id)
+                await ingest_pdf(str(pdf), normalized_notebook_id)
                 await asyncio.sleep(1) # stagger logic
                 
         background_tasks.add_task(process_all_pdfs)

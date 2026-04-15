@@ -10,6 +10,13 @@ from watchdog.observers import Observer
 from papermind.models import WatchedFolder
 
 
+def _normalize_notebook_id(notebook_id: str) -> str:
+    raw = str(notebook_id or "").strip()
+    if not raw:
+        raise ValueError("notebook_id is required")
+    return raw if ":" in raw else f"notebook:{raw}"
+
+
 async def check_file_stability(file_path: str, wait_time: int = 2) -> bool:
     """Wait for file size to stabilize to ensure it's fully written."""
     p = Path(file_path)
@@ -44,6 +51,7 @@ async def ingest_pdf(pdf_path: str, notebook_id: str):
         logger.warning(f"File {pdf_path} did not stabilize in time, skipping.")
         return
 
+    normalized_notebook_id = _normalize_notebook_id(notebook_id)
     API_BASE = os.environ.get("PAPERMIND_API_BASE", "http://localhost:5055")
     logger.info(f"Using notebook_id: {notebook_id}")
     logger.info(f"Calling /api/papermind/upload for {pdf_path}")
@@ -53,7 +61,7 @@ async def ingest_pdf(pdf_path: str, notebook_id: str):
             res = await client.post(
                 f"{API_BASE}/api/papermind/upload",
                 data={
-                    "notebook_id": notebook_id,
+                    "notebook_id": normalized_notebook_id,
                     "triggered_by": "watcher",
                 },
                 files={"file": (Path(pdf_path).name, f, "application/pdf")},
@@ -138,10 +146,7 @@ class FolderWatcher:
 
     @staticmethod
     def _normalized_notebook_id(notebook_id: str) -> str:
-        raw = str(notebook_id or "").strip()
-        if not raw:
-            raise ValueError("notebook_id is required")
-        return raw if ":" in raw else f"notebook:{raw}"
+        return _normalize_notebook_id(notebook_id)
 
     def add_folder_watch(self, path: str, notebook_id: str, recursive: bool):
         normalized_path = self._normalized_path(path)
@@ -185,6 +190,21 @@ class FolderWatcher:
 
         existing = await WatchedFolder.get_all()
         for folder in existing:
+            if (
+                self._normalized_path(folder.path) == normalized_path
+                and self._normalized_notebook_id(str(folder.notebook_id)) == normalized_notebook_id
+            ):
+                folder.path = normalized_path
+                folder.notebook_id = normalized_notebook_id
+                folder.recursive = recursive
+                folder.active = True
+                await folder.save()
+                self.add_folder_watch(normalized_path, normalized_notebook_id, recursive)
+                return folder
+
+        # A folder path is exclusive to a single notebook watcher.
+        # If path exists for another notebook, move binding to requested notebook.
+        for folder in existing:
             if self._normalized_path(folder.path) == normalized_path:
                 folder.path = normalized_path
                 folder.notebook_id = normalized_notebook_id
@@ -214,14 +234,13 @@ class FolderWatcher:
             logger.info(f"Stopped watching folder: {normalized_path}")
 
     async def remove_folder(self, folder_id: str):
-        """Mark watched folder inactive in DB and stop its observer."""
+        """Delete watched folder binding from DB and stop its observer."""
         folder = await WatchedFolder.get(folder_id)
         if not folder:
             return None
 
         self.remove_folder_watch(folder.path)
-        folder.active = False
-        await folder.save()
+        await folder.delete()
         return folder
 
     async def stop(self):

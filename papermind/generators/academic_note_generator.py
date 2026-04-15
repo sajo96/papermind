@@ -42,6 +42,23 @@ class AcademicNoteGenerator:
         return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
 
     @staticmethod
+    def _rows_from_query_result(query_result: Any) -> List[Any]:
+        if not query_result:
+            return []
+
+        first = query_result[0]
+        if isinstance(first, dict) and isinstance(first.get("result"), list):
+            return first["result"]
+        if isinstance(first, list):
+            return first
+        if isinstance(query_result, list):
+            # Support scalar rows from "SELECT VALUE ..." queries.
+            return query_result
+        if isinstance(query_result, list) and all(isinstance(x, dict) for x in query_result):
+            return query_result
+        return []
+
+    @staticmethod
     def _canonical_concept_id(value: str) -> Optional[str]:
         raw = (value or "").strip().lower()
         if not raw:
@@ -56,7 +73,35 @@ class AcademicNoteGenerator:
             "data", "figure", "table", "section", "reference", "references",
             "https", "http", "www",
         }
+        geo_terms = {
+            "usa", "u s a", "u s", "us", "united states", "united kingdom",
+            "england", "scotland", "wales", "ireland", "denmark", "sweden",
+            "norway", "finland", "germany", "france", "italy", "spain",
+            "portugal", "netherlands", "belgium", "switzerland", "austria",
+            "poland", "ukraine", "russia", "china", "japan", "korea", "india",
+            "canada", "mexico", "brazil", "argentina", "australia", "new zealand",
+            "africa", "asia", "europe", "north america", "south america",
+            "american", "british", "danish", "swedish", "norwegian", "finnish",
+            "german", "french", "italian", "spanish", "portuguese", "dutch",
+            "belgian", "austrian", "polish", "russian", "chinese", "japanese",
+            "korean", "indian", "canadian", "mexican", "brazilian", "argentinian",
+            "australian", "colorado", "boulder",
+        }
         if key in noisy_terms:
+            return None
+        if key in geo_terms:
+            return None
+        for term in geo_terms:
+            if re.search(rf"\b{re.escape(term)}\b", key):
+                return None
+        if re.search(
+            r"\b(university|universities|college|institute|institution|department|school|faculty|hospital|center|centre|laboratory|lab|ministry)\b",
+            key,
+        ):
+            return None
+        if re.search(r"\b(country|state|city|nation|province|county|capital|region)\b", key):
+            return None
+        if re.search(r"\b(edu|ac uk|gmail|yahoo|outlook)\b", key):
             return None
         return f"concept:{key.replace(' ', '_')}"
 
@@ -69,21 +114,37 @@ class AcademicNoteGenerator:
             return [value.strip()][:max_items]
         return list(fallback or [])[:max_items]
 
+    @staticmethod
+    def _author_terms(authors: List[str]) -> set[str]:
+        terms: set[str] = set()
+        for author in authors or []:
+            cleaned = re.sub(r"[^a-z0-9\s]+", " ", str(author or "").strip().lower())
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            if not cleaned:
+                continue
+            terms.add(cleaned)
+            for part in cleaned.split():
+                if len(part) >= 4:
+                    terms.add(part)
+        return terms
+
     async def _resolve_notebook_id_for_source(self, source_id: str) -> str:
         try:
-            relation_rows = await repo_query(
+            relation_rows_raw = await repo_query(
                 "SELECT VALUE out FROM reference WHERE in = $source_id LIMIT 1",
                 {"source_id": ensure_record_id(source_id)},
             )
+            relation_rows = self._rows_from_query_result(relation_rows_raw)
             if relation_rows:
                 candidate = relation_rows[0]
                 if candidate:
                     return str(candidate)
 
-            source_rows = await repo_query(
+            source_rows_raw = await repo_query(
                 "SELECT notebook_id FROM source WHERE id = $source_id LIMIT 1",
                 {"source_id": ensure_record_id(source_id)},
             )
+            source_rows = self._rows_from_query_result(source_rows_raw)
             if source_rows and isinstance(source_rows[0], dict):
                 candidate = source_rows[0].get("notebook_id")
                 if candidate:
@@ -123,6 +184,19 @@ class AcademicNoteGenerator:
             cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
             cleaned = re.sub(r"\s*```$", "", cleaned)
         return cleaned.strip()
+
+    @staticmethod
+    def _is_placeholder_text(text: str) -> bool:
+        raw = (text or "").strip().lower()
+        if not raw:
+            return True
+        if raw in {"n/a", "none", "not available"}:
+            return True
+        return (
+            "unavailable" in raw
+            or "not explicitly stated" in raw
+            or "details unavailable" in raw
+        )
 
     @staticmethod
     def _split_sentences(text: str) -> List[str]:
@@ -190,6 +264,41 @@ class AcademicNoteGenerator:
         )
         candidate = "\n".join([paper.abstract or "", joined_sections]).strip()
         return candidate[:limit]
+
+    def _derive_methodology_from_text(self, text: str) -> str:
+        sentences = self._split_sentences(text)
+        method_hits = [
+            s for s in sentences
+            if re.search(
+                r"\b(method|methodology|dataset|experiment|evaluate|evaluation|approach|model|protocol|simulation)\b",
+                s,
+                re.IGNORECASE,
+            )
+        ]
+        if method_hits:
+            return " ".join(method_hits[:2]).strip()
+        return ""
+
+    def _derive_limitations_from_text(self, text: str) -> List[str]:
+        sentences = self._split_sentences(text)
+        limitation_hits = [
+            s for s in sentences
+            if re.search(
+                r"\b(limit|limitations|future work|constraint|weakness|caveat|shortcoming|however|although|may|might|could|tradeoff|error|uncertain)\b",
+                s,
+                re.IGNORECASE,
+            )
+        ]
+        if limitation_hits:
+            return limitation_hits[:5]
+
+        # Fallback: return one long sentence from the tail where limitations are often discussed.
+        tail = sentences[-20:]
+        for sentence in tail:
+            cleaned = sentence.strip()
+            if len(cleaned) > 80:
+                return [cleaned]
+        return []
 
     async def _call_llm_for_section(
         self,
@@ -319,7 +428,8 @@ class AcademicNoteGenerator:
             source_id = getattr(paper, "source_id", None)
             if not source_id:
                 return ""
-            rows = await repo_query("SELECT full_text FROM $id", {"id": ensure_record_id(str(source_id))})
+            rows_raw = await repo_query("SELECT full_text FROM $id", {"id": ensure_record_id(str(source_id))})
+            rows = self._rows_from_query_result(rows_raw)
             if rows and isinstance(rows[0], dict):
                 return str(rows[0].get("full_text") or "").strip()
             return ""
@@ -339,8 +449,11 @@ class AcademicNoteGenerator:
         """
         # Run generations in parallel or sequentially. We will do sequentially to respect rate limits if any
         supplemental_text = self._paper_fallback_text(paper, limit=4000)
-        if not supplemental_text:
-            supplemental_text = await self._source_full_text(paper)
+        source_full_text = await self._source_full_text(paper)
+        if source_full_text:
+            supplemental_text = (supplemental_text + "\n\n" + source_full_text[:12000]).strip()
+        elif not supplemental_text:
+            supplemental_text = source_full_text
 
         one_line_summary = await self._call_llm_for_section(
             "one_line_summary", paper, self.sections["one_line_summary"], supplemental_text
@@ -369,6 +482,18 @@ class AcademicNoteGenerator:
             fallback=["Limitations not explicitly stated in source text."],
         )
         concepts = self._ensure_str_list(concepts, fallback=[])
+
+        methodology = str(methodology or "").strip()
+        if self._is_placeholder_text(methodology):
+            methodology = self._derive_methodology_from_text(supplemental_text)
+
+        filtered_limitations = [
+            item for item in limitations
+            if not self._is_placeholder_text(str(item))
+        ]
+        if not filtered_limitations:
+            filtered_limitations = self._derive_limitations_from_text(supplemental_text)
+        limitations = filtered_limitations
 
         # 6. Save note to Open Notebook note table
         content_md = f"# Note for {paper.title}\n\n"
@@ -414,8 +539,13 @@ class AcademicNoteGenerator:
 
         # 7. Create/link concept records (normalized and deduplicated)
         concept_map: Dict[str, str] = {}
+        author_terms = self._author_terms(list(paper.authors or []))
         for concept_label in concepts:
             cleaned = str(concept_label or "").strip()
+            normalized = re.sub(r"[^a-z0-9\s]+", " ", cleaned.lower())
+            normalized = re.sub(r"\s+", " ", normalized).strip()
+            if normalized in author_terms:
+                continue
             concept_id = self._canonical_concept_id(cleaned)
             if not concept_id:
                 continue

@@ -125,6 +125,86 @@ _NOISY_CONCEPT_TERMS = {
     "sites",
     "march",
     "computing",
+    "author",
+    "authors",
+    "doi",
+    "issn",
+    "isbn",
+    "arxiv",
+    "preprint",
+    "publication",
+    "publisher",
+}
+
+_GEO_CONCEPT_TERMS = {
+    "usa",
+    "u s a",
+    "u s",
+    "us",
+    "united states",
+    "united kingdom",
+    "england",
+    "scotland",
+    "wales",
+    "ireland",
+    "denmark",
+    "sweden",
+    "norway",
+    "finland",
+    "germany",
+    "france",
+    "italy",
+    "spain",
+    "portugal",
+    "netherlands",
+    "belgium",
+    "switzerland",
+    "austria",
+    "poland",
+    "ukraine",
+    "russia",
+    "china",
+    "japan",
+    "korea",
+    "india",
+    "canada",
+    "mexico",
+    "brazil",
+    "argentina",
+    "australia",
+    "new zealand",
+    "africa",
+    "asia",
+    "europe",
+    "north america",
+    "south america",
+    "american",
+    "british",
+    "danish",
+    "swedish",
+    "norwegian",
+    "finnish",
+    "german",
+    "french",
+    "italian",
+    "spanish",
+    "portuguese",
+    "dutch",
+    "belgian",
+    "austrian",
+    "polish",
+    "russian",
+    "chinese",
+    "japanese",
+    "korean",
+    "indian",
+    "canadian",
+    "mexican",
+    "brazilian",
+    "argentinian",
+    "australian",
+    "colorado",
+    "boulder",
 }
 
 
@@ -149,7 +229,23 @@ def _is_noisy_concept_key(key: str) -> bool:
         return True
     if key in _NOISY_CONCEPT_TERMS:
         return True
-    if re.search(r"\b(issn|journal|volume|issue)\b", key):
+    if key in _GEO_CONCEPT_TERMS:
+        return True
+    for term in _GEO_CONCEPT_TERMS:
+        if re.search(rf"\b{re.escape(term)}\b", key):
+            return True
+    if re.search(r"\b(issn|isbn|doi|arxiv|journal|volume|issue|author|authors?)\b", key):
+        return True
+    if re.search(
+        r"\b(university|universities|college|institute|institution|department|school|faculty|hospital|center|centre|laboratory|lab|ministry)\b",
+        key,
+    ):
+        return True
+    if re.search(r"\b(country|state|city|nation|province|county|capital|region)\b", key):
+        return True
+    if re.search(r"\b(edu|ac uk|gmail|yahoo|outlook)\b", key):
+        return True
+    if re.search(r"\b10\.\d{4,}/", key):
         return True
     # Mostly numeric/metadata-like labels are not useful graph concepts.
     alnum = re.sub(r"[^a-z0-9]", "", key)
@@ -238,10 +334,26 @@ async def get_notebook_graph(
             if src_id and src_title:
                 source_title_by_id[src_id] = src_title
 
+        author_terms: set[str] = set()
+        for p in papers:
+            for author in p.get("authors", []) or []:
+                normalized_author = _canonical_concept_key(str(author or ""))
+                if not normalized_author:
+                    continue
+                author_terms.add(normalized_author)
+                for part in normalized_author.split():
+                    if len(part) >= 4:
+                        author_terms.add(part)
+
         concept_catalog: set[str] = set()
         for p in papers:
             raw_concepts = _record_id_list(p.get("concepts", []))
-            for cid in (_canonical_concept_id(c) for c in raw_concepts):
+            for c in raw_concepts:
+                cid = _canonical_concept_id(c)
+                if not cid:
+                    continue
+                if _canonical_concept_key(cid) in author_terms:
+                    continue
                 if cid:
                     concept_catalog.add(cid)
 
@@ -279,6 +391,8 @@ async def get_notebook_graph(
             for raw_concept in concepts_list:
                 canonical_id = _canonical_concept_id(raw_concept)
                 if not canonical_id or canonical_id in seen_concepts:
+                    continue
+                if _canonical_concept_key(canonical_id) in author_terms:
                     continue
                 seen_concepts.add(canonical_id)
                 canonical_concepts.append(canonical_id)

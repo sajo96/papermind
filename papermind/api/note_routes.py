@@ -64,6 +64,19 @@ def _extract_section_block(content: str, start_header: str, end_headers: list[st
     return content[start:end].strip()
 
 
+def _is_placeholder_text(value: str) -> bool:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return True
+    placeholders = {
+        "methodology details unavailable.",
+        "limitations not explicitly stated in source text.",
+        "n/a",
+        "none",
+    }
+    return raw in placeholders
+
+
 def _parse_loose_mapping(raw: str) -> Optional[dict]:
     text = (raw or "").strip()
     if not text:
@@ -164,6 +177,8 @@ def _parse_ai_note_content(note_obj: dict) -> dict:
         methodology_raw,
         ["methodology", "methods", "approach", "dataset", "experimental_setup"],
     )
+    if _is_placeholder_text(methodology):
+        methodology = ""
 
     limitations_block = _extract_section_block(
         content,
@@ -181,6 +196,7 @@ def _parse_ai_note_content(note_obj: dict) -> dict:
                 ["limitation", "limitations", "risk", "caveat"],
             )
         )
+    limitations = [item for item in limitations if not _is_placeholder_text(item)]
 
     concepts_match = re.search(r"\*\*Concepts\*\*:\s*(.*)", content)
     concepts_raw = concepts_match.group(1).strip() if concepts_match else ""
@@ -195,6 +211,78 @@ def _parse_ai_note_content(note_obj: dict) -> dict:
         "concepts": concepts,
     }
     return _json_safe(structured)
+
+
+def _derive_methodology_and_limitations_from_paper(paper: dict, source_full_text: str = "") -> tuple[str, list[str]]:
+    sections = paper.get("sections") if isinstance(paper, dict) else {}
+    if not isinstance(sections, dict):
+        sections = {}
+
+    normalized_sections = {
+        str(k or "").strip().lower(): str(v or "").strip()
+        for k, v in sections.items()
+        if str(v or "").strip()
+    }
+
+    methodology_candidates = [
+        normalized_sections.get("methods", ""),
+        normalized_sections.get("methodology", ""),
+        normalized_sections.get("materials_and_methods", ""),
+    ]
+    methodology = next((m for m in methodology_candidates if m), "")
+    if not methodology:
+        source_pool = "\n".join(
+            [
+                normalized_sections.get("full_text", ""),
+                source_full_text,
+            ]
+        ).strip()
+        sentences = re.split(r"(?<=[.!?])\s+", source_pool)
+        method_hits = [
+            s.strip()
+            for s in sentences
+            if re.search(
+                r"\b(method|methodology|dataset|experiment|evaluation|approach|protocol|model|simulation)\b",
+                s,
+                re.IGNORECASE,
+            )
+            and len(s.strip()) > 30
+        ]
+        if method_hits:
+            methodology = " ".join(method_hits[:2]).strip()
+
+    limitation_text = "\n".join(
+        [
+            normalized_sections.get("discussion", ""),
+            normalized_sections.get("conclusion", ""),
+            normalized_sections.get("full_text", "")[:2000],
+            source_full_text[:4000],
+        ]
+    )
+    limitation_hits: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+", limitation_text):
+        s = sentence.strip()
+        if not s:
+            continue
+        if re.search(
+            r"\b(limit|limitations|future work|constraint|caveat|weakness|shortcoming|however|although|may|might|could|tradeoff|error|uncertain)\b",
+            s,
+            re.IGNORECASE,
+        ):
+            limitation_hits.append(s)
+        if len(limitation_hits) >= 4:
+            break
+
+    if not limitation_hits:
+        tail_sentences = [
+            s.strip()
+            for s in re.split(r"(?<=[.!?])\s+", limitation_text)
+            if len(s.strip()) > 80
+        ]
+        if tail_sentences:
+            limitation_hits = tail_sentences[-2:]
+
+    return methodology[:1200], limitation_hits
 
 class GenerateNoteRequest(BaseModel):
     paper_id: str
@@ -260,7 +348,48 @@ async def get_note_for_paper(paper_id: str):
         rows = _rows_from_query_result(existing_note_query)
         existing_note = _extract_ai_note_from_rows(rows)
         if existing_note:
-            return _parse_ai_note_content(existing_note)
+            parsed_note = _parse_ai_note_content(existing_note)
+
+            needs_enrichment = not parsed_note.get("methodology") or not parsed_note.get("limitations")
+            if needs_enrichment:
+                paper_rows_raw = await repo_query(
+                    "SELECT sections FROM $id",
+                    {"id": ensure_record_id(paper_id_full)},
+                )
+                paper_rows = _rows_from_query_result(paper_rows_raw)
+                paper_row = paper_rows[0] if paper_rows and isinstance(paper_rows[0], dict) else {}
+                source_full_text = ""
+                source_rows_raw = await repo_query(
+                    "SELECT source_id FROM $id",
+                    {"id": ensure_record_id(paper_id_full)},
+                )
+                source_rows = _rows_from_query_result(source_rows_raw)
+                source_row = source_rows[0] if source_rows and isinstance(source_rows[0], dict) else {}
+                source_id = source_row.get("source_id")
+                if source_id:
+                    source_text_rows_raw = await repo_query(
+                        "SELECT full_text FROM $id",
+                        {"id": ensure_record_id(str(source_id))},
+                    )
+                    source_text_rows = _rows_from_query_result(source_text_rows_raw)
+                    source_text_row = (
+                        source_text_rows[0]
+                        if source_text_rows and isinstance(source_text_rows[0], dict)
+                        else {}
+                    )
+                    source_full_text = str(source_text_row.get("full_text") or "")
+
+                derived_methodology, derived_limitations = _derive_methodology_and_limitations_from_paper(
+                    paper_row,
+                    source_full_text=source_full_text,
+                )
+
+                if not parsed_note.get("methodology") and derived_methodology:
+                    parsed_note["methodology"] = derived_methodology
+                if not parsed_note.get("limitations") and derived_limitations:
+                    parsed_note["limitations"] = derived_limitations
+
+            return parsed_note
         raise HTTPException(status_code=404, detail="AI Note not found for this paper")
     except HTTPException:
         raise

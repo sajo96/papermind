@@ -16,7 +16,6 @@ import { EmptyState } from '@/components/common/EmptyState'
 import { AddSourceDialog } from '@/components/sources/AddSourceDialog'
 import { AddExistingSourceDialog } from '@/components/sources/AddExistingSourceDialog'
 import { SourceCard } from '@/components/sources/SourceCard'
-import { WatchedFolders } from '@/components/WatchedFolders'
 import { useDeleteSource, useRetrySource, useRemoveSourceFromNotebook } from '@/lib/hooks/use-sources'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { useModalManager } from '@/lib/hooks/use-modal-manager'
@@ -224,14 +223,6 @@ export function SourcesColumn({
                     )}
                   </div>
                 )}
-
-                {/* Divider before watched folders */}
-                {sources && sources.length > 0 && (
-                  <div className="border-t border-border" />
-                )}
-
-                {/* Watched Folders Section */}
-                <WatchedFolders notebookId={notebookId} />
               </div>
             )}
           </CardContent>
