@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from pydantic import BaseModel
 from loguru import logger
 
@@ -76,10 +76,14 @@ async def remove_watched_folder(folder_id: str):
 
 
 @router.get("", response_model=List[WatchResponse])
-async def list_watched_folders():
-    """List all watched folders and their status."""
+async def list_watched_folders(notebook_id: Optional[str] = Query(None)):
+    """List watched folders, optionally scoped to a specific notebook."""
     try:
         folders = await WatchedFolder.get_all()
+        if notebook_id:
+            expected_notebook_id = notebook_id if ":" in notebook_id else f"notebook:{notebook_id}"
+            folders = [f for f in folders if str(f.notebook_id) == expected_notebook_id]
+
         return [
             WatchResponse(
                 id=f.id,

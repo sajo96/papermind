@@ -50,7 +50,47 @@ class AcademicNoteGenerator:
         key = re.sub(r"\s+", " ", key).strip()
         if len(key) < 3:
             return None
+        noisy_terms = {
+            "paper", "study", "result", "results", "method", "methods", "model",
+            "conclusion", "introduction", "discussion", "abstract", "analysis",
+            "data", "figure", "table", "section", "reference", "references",
+            "https", "http", "www",
+        }
+        if key in noisy_terms:
+            return None
         return f"concept:{key.replace(' ', '_')}"
+
+    @staticmethod
+    def _ensure_str_list(value: Any, fallback: Optional[List[str]] = None, max_items: int = 8) -> List[str]:
+        if isinstance(value, list):
+            items = [str(item).strip() for item in value if str(item).strip()]
+            return items[:max_items]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()][:max_items]
+        return list(fallback or [])[:max_items]
+
+    async def _resolve_notebook_id_for_source(self, source_id: str) -> str:
+        try:
+            relation_rows = await repo_query(
+                "SELECT VALUE out FROM reference WHERE in = $source_id LIMIT 1",
+                {"source_id": ensure_record_id(source_id)},
+            )
+            if relation_rows:
+                candidate = relation_rows[0]
+                if candidate:
+                    return str(candidate)
+
+            source_rows = await repo_query(
+                "SELECT notebook_id FROM source WHERE id = $source_id LIMIT 1",
+                {"source_id": ensure_record_id(source_id)},
+            )
+            if source_rows and isinstance(source_rows[0], dict):
+                candidate = source_rows[0].get("notebook_id")
+                if candidate:
+                    return str(candidate)
+        except Exception:
+            return ""
+        return ""
 
     def _section_text(self, paper: AcademicPaper, *aliases: str, limit: int = 4000) -> str:
         sections = paper.sections if isinstance(paper.sections, dict) else {}
@@ -323,6 +363,12 @@ class AcademicNoteGenerator:
             one_line_summary = one_line_summary["one_line_summary"]
         if isinstance(methodology, dict) and "methodology" in methodology:
             methodology = methodology["methodology"]
+        key_findings = self._ensure_str_list(key_findings, fallback=["No key findings available."])
+        limitations = self._ensure_str_list(
+            limitations,
+            fallback=["Limitations not explicitly stated in source text."],
+        )
+        concepts = self._ensure_str_list(concepts, fallback=[])
 
         # 6. Save note to Open Notebook note table
         content_md = f"# Note for {paper.title}\n\n"
@@ -353,7 +399,7 @@ class AcademicNoteGenerator:
             raise RuntimeError("Failed to persist generated note record")
         
         # Link note to the notebook and paper using reference edges
-        notebook_id = getattr(paper.source_id, "notebook_id", "") if hasattr(paper.source_id, "notebook_id") else ""
+        notebook_id = await self._resolve_notebook_id_for_source(str(paper.source_id))
         if notebook_id:
             await note.add_to_notebook(str(notebook_id))
         

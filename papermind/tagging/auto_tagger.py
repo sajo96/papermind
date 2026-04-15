@@ -17,11 +17,33 @@ class AutoTagger:
     def __init__(self) -> None:
         self._spacy_nlp = None
         self._spacy_attempted = False
+        self._noise_terms = {
+            "paper", "study", "result", "results", "method", "methods", "model",
+            "analysis", "introduction", "discussion", "conclusion", "abstract",
+            "data", "table", "figure", "section", "reference", "references",
+            "this", "that", "these", "those", "using", "used", "based",
+            "journal", "volume", "issue", "http", "https", "www",
+        }
+
+    def _is_noisy_label(self, label: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9\s]+", " ", (label or "").strip().lower())
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if not normalized:
+            return True
+        if normalized in self._noise_terms:
+            return True
+        if len(normalized) < 3:
+            return True
+        if len(normalized) > 60:
+            return True
+        if normalized.isdigit():
+            return True
+        return False
 
     def _canonical_concept_id(self, value: str) -> Optional[str]:
         cleaned = re.sub(r"[^a-z0-9\s]+", " ", (value or "").strip().lower())
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        if len(cleaned) < 3:
+        if self._is_noisy_label(cleaned):
             return None
         return f"concept:{cleaned.replace(' ', '_')}"
 

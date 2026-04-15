@@ -109,6 +109,7 @@ class FolderWatcher:
 
     def __init__(self):
         self._observers = {}
+        self._watch_configs = {}
         self._loop = None
 
     async def start(self):
@@ -131,51 +132,86 @@ class FolderWatcher:
         except Exception as e:
             logger.error(f"Failed to initialize folder watchers: {e}")
 
+    @staticmethod
+    def _normalized_path(path: str) -> str:
+        return str(Path(path).expanduser().resolve())
+
+    @staticmethod
+    def _normalized_notebook_id(notebook_id: str) -> str:
+        raw = str(notebook_id or "").strip()
+        if not raw:
+            raise ValueError("notebook_id is required")
+        return raw if ":" in raw else f"notebook:{raw}"
+
     def add_folder_watch(self, path: str, notebook_id: str, recursive: bool):
-        if path in self._observers:
-            logger.warning(f"Already watching {path}")
+        normalized_path = self._normalized_path(path)
+        normalized_notebook_id = self._normalized_notebook_id(notebook_id)
+
+        existing = self._watch_configs.get(normalized_path)
+        if existing == (normalized_notebook_id, recursive):
+            logger.info(
+                f"Watcher already active for {normalized_path} "
+                f"(notebook={normalized_notebook_id}, recursive={recursive})"
+            )
             return
+
+        if normalized_path in self._observers:
+            logger.info(
+                f"Rebinding watcher {normalized_path} to notebook "
+                f"{normalized_notebook_id} (recursive={recursive})"
+            )
+            self.remove_folder_watch(normalized_path)
             
-        p = Path(path)
+        p = Path(normalized_path)
         if not p.exists():
-            logger.warning(f"Watched path {path} does not exist, creating it.")
+            logger.warning(f"Watched path {normalized_path} does not exist, creating it.")
             p.mkdir(parents=True, exist_ok=True)
             
         observer = Observer()
-        handler = PDFHandler(notebook_id, self._loop)
-        observer.schedule(handler, path, recursive=recursive)
+        handler = PDFHandler(normalized_notebook_id, self._loop)
+        observer.schedule(handler, normalized_path, recursive=recursive)
         observer.start()
-        self._observers[path] = observer
-        logger.info(f"Started watching folder: {path} for notebook: {notebook_id}")
+        self._observers[normalized_path] = observer
+        self._watch_configs[normalized_path] = (normalized_notebook_id, recursive)
+        logger.info(
+            f"Started watching folder: {normalized_path} "
+            f"for notebook: {normalized_notebook_id}"
+        )
 
     async def add_folder(self, path: str, notebook_id: str, recursive: bool):
         """Insert or reactivate watched folder in DB and start its observer."""
+        normalized_path = self._normalized_path(path)
+        normalized_notebook_id = self._normalized_notebook_id(notebook_id)
+
         existing = await WatchedFolder.get_all()
         for folder in existing:
-            if folder.path == path:
-                folder.notebook_id = notebook_id
+            if self._normalized_path(folder.path) == normalized_path:
+                folder.path = normalized_path
+                folder.notebook_id = normalized_notebook_id
                 folder.recursive = recursive
                 folder.active = True
                 await folder.save()
-                self.add_folder_watch(path, notebook_id, recursive)
+                self.add_folder_watch(normalized_path, normalized_notebook_id, recursive)
                 return folder
 
         folder = WatchedFolder(
-            path=path,
-            notebook_id=notebook_id,
+            path=normalized_path,
+            notebook_id=normalized_notebook_id,
             recursive=recursive,
             active=True,
         )
         await folder.save()
-        self.add_folder_watch(path, notebook_id, recursive)
+        self.add_folder_watch(normalized_path, normalized_notebook_id, recursive)
         return folder
 
     def remove_folder_watch(self, path: str):
-        if path in self._observers:
-            observer = self._observers.pop(path)
+        normalized_path = self._normalized_path(path)
+        if normalized_path in self._observers:
+            observer = self._observers.pop(normalized_path)
             observer.stop()
             observer.join()
-            logger.info(f"Stopped watching folder: {path}")
+            self._watch_configs.pop(normalized_path, None)
+            logger.info(f"Stopped watching folder: {normalized_path}")
 
     async def remove_folder(self, folder_id: str):
         """Mark watched folder inactive in DB and stop its observer."""
