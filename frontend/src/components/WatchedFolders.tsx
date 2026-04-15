@@ -9,7 +9,6 @@ import { Label } from '@/components/ui/label'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Badge } from '@/components/ui/badge'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
-import { EmptyState } from '@/components/common/EmptyState'
 import { FolderOpen, Loader2, Trash2, RotateCcw } from 'lucide-react'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { toast } from 'sonner'
@@ -264,7 +263,7 @@ export function WatchedFolders({ notebookId }: WatchedFoldersProps) {
                                         </div>
                                     </div>
                                 ) : (
-                  <>
+                                    <>
                                         {/* Folder info */}
                                         <div className="flex items-start justify-between gap-2 mb-2">
                                             <div className="flex items-start gap-2 flex-1 min-w-0">
@@ -318,3 +317,15 @@ export function WatchedFolders({ notebookId }: WatchedFoldersProps) {
                                                 className="h-7 text-xs"
                                             >
                                                 <Trash2 className="h-3 w-3 mr-1" />
+                                                {t.common.remove || 'Remove'}
+                                            </Button>
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        ))}
+                </div>
+            )}
+        </section>
+    )
+}
