@@ -171,6 +171,7 @@ class PaperStatusResponse(BaseModel):
     job_status: str | None
     stage_updated_at: datetime | None
     error_message: str | None
+    processing_info: dict[str, Any] | None = None
 
 
 @router.get("/papers/{paper_id}/status", response_model=PaperStatusResponse)
@@ -185,4 +186,5 @@ async def get_paper_status(paper_id: str):
         job_status=progress["job_status"],
         stage_updated_at=progress["stage_updated_at"],
         error_message=progress["error_message"],
+        processing_info=progress.get("processing_info"),
     )

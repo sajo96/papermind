@@ -67,14 +67,54 @@ class AcademicPaper(ObjectModel):
             return "unknown"
 
     async def get_processing_progress(self) -> Dict[str, Any]:
-        """Return combined pipeline stage + job-level status for the UI."""
-        job_status = await self.get_status()
-        return {
-            "pipeline_stage": self.pipeline_stage,
-            "job_status": job_status,
-            "stage_updated_at": self.stage_updated_at,
-            "error_message": self.error_message,
-        }
+        """Return pipeline stage + command execution metadata for UI polling."""
+        if not self.command:
+            return {
+                "pipeline_stage": self.pipeline_stage,
+                "job_status": None,
+                "stage_updated_at": self.stage_updated_at,
+                "error_message": self.error_message,
+                "processing_info": None,
+            }
+
+        try:
+            from surreal_commands import get_command_status
+
+            status_result = await get_command_status(str(self.command))
+            if not status_result:
+                return {
+                    "pipeline_stage": self.pipeline_stage,
+                    "job_status": "unknown",
+                    "stage_updated_at": self.stage_updated_at,
+                    "error_message": self.error_message,
+                    "processing_info": None,
+                }
+
+            result = getattr(status_result, "result", None)
+            execution_metadata = (
+                result.get("execution_metadata", {}) if isinstance(result, dict) else {}
+            )
+
+            return {
+                "pipeline_stage": self.pipeline_stage,
+                "job_status": status_result.status,
+                "stage_updated_at": self.stage_updated_at,
+                "error_message": self.error_message or getattr(status_result, "error_message", None),
+                "processing_info": {
+                    "started_at": execution_metadata.get("started_at"),
+                    "completed_at": execution_metadata.get("completed_at"),
+                    "result": result,
+                },
+            }
+        except Exception as e:
+            logger.warning(f"Progress fetch failed for {self.command}: {e}")
+            return {
+                "pipeline_stage": self.pipeline_stage,
+                "job_status": "unknown",
+                "stage_updated_at": self.stage_updated_at,
+                "error_message": self.error_message,
+                "processing_info": None,
+            }
 
 
 class Atom(ObjectModel):

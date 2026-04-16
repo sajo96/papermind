@@ -337,6 +337,12 @@ export function usePaperStatusBySource(sourceId: string, enabled = true) {
     queryFn: () => sourcesApi.getPaperStatusBySource(sourceId),
     enabled: !!sourceId && enabled,
     refetchInterval: (query) => {
+      const queryError = query.state.error as { response?: { status?: number } } | null
+      if (queryError?.response?.status === 404) {
+        // No paper linked to this source; stop polling.
+        return false
+      }
+
       const data = query.state.data as PaperStatusResponse | undefined
       if (!data?.pipeline_stage) {
         return 3000

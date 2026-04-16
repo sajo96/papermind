@@ -61,6 +61,7 @@ class PaperStatusResponse(BaseModel):
     job_status: Optional[str]
     stage_updated_at: Optional[datetime]
     error_message: Optional[str]
+    processing_info: Optional[dict[str, Any]] = None
 
 
 class PaperDetailResponse(BaseModel):
@@ -794,6 +795,7 @@ async def get_paper_status(paper_id: str):
         job_status=progress["job_status"],
         stage_updated_at=progress["stage_updated_at"],
         error_message=progress["error_message"],
+        processing_info=progress.get("processing_info"),
     )
 
 
@@ -819,6 +821,7 @@ async def get_paper_status_by_source(source_id: str):
         job_status=progress["job_status"],
         stage_updated_at=progress["stage_updated_at"],
         error_message=progress["error_message"],
+        processing_info=progress.get("processing_info"),
     )
 
 

@@ -145,6 +145,7 @@ export function SourceCard({
 
   // Track processing state to continue polling until we detect completion
   const [wasProcessing, setWasProcessing] = useState(false)
+  const [showDoneStageBadge, setShowDoneStageBadge] = useState(false)
 
   const shouldFetchStatus = !!sourceWithStatus.command_id ||
     sourceWithStatus.status === 'new' ||
@@ -157,7 +158,7 @@ export function SourceCard({
     source.id,
     shouldFetchStatus
   )
-  const { data: paperStatusData } = usePaperStatusBySource(source.id, shouldFetchStatus)
+  const { data: paperStatusData } = usePaperStatusBySource(source.id, !!source.id)
 
   // Determine current status
   // If source has a command_id but no status, treat as "new" (just created)
@@ -224,6 +225,18 @@ export function SourceCard({
   const pipelineStage = paperStatusData?.pipeline_stage ?? undefined
   const pipelineLabel = pipelineStage ? PIPELINE_STAGE_LABELS[pipelineStage] || pipelineStage : null
   const pipelineError = paperStatusData?.error_message || null
+  const pipelineInProgress = !!pipelineStage && !['done', 'failed'].includes(pipelineStage)
+  const shouldShowPipelineBadge = !!pipelineLabel && (pipelineStage !== 'done' || showDoneStageBadge)
+
+  useEffect(() => {
+    if (pipelineStage === 'done') {
+      setShowDoneStageBadge(true)
+      const timer = setTimeout(() => setShowDoneStageBadge(false), 2000)
+      return () => clearTimeout(timer)
+    }
+
+    setShowDoneStageBadge(true)
+  }, [pipelineStage])
 
   return (
     <Card
@@ -272,13 +285,14 @@ export function SourceCard({
               </p>
             )}
 
-            {pipelineLabel && (
+            {shouldShowPipelineBadge && (
               <div className="mb-2">
                 <Badge
                   variant={pipelineStage === 'failed' ? 'destructive' : 'outline'}
-                  className="text-xs"
+                  className="text-xs flex items-center gap-1.5"
                   title={pipelineError || undefined}
                 >
+                  {pipelineInProgress && <Loader2 className="h-3 w-3 animate-spin" />}
                   Stage: {pipelineLabel}
                 </Badge>
               </div>
