@@ -12,6 +12,7 @@ import {
   SourceStatusResponse,
   SourceListResponse,
   IngestResponse,
+  PaperStatusResponse,
 } from '@/lib/types/api'
 
 const NOTEBOOK_SOURCES_PAGE_SIZE = 30
@@ -321,6 +322,32 @@ export function useSourceStatus(sourceId: string, enabled = true) {
     staleTime: 0, // Always consider status data stale for real-time updates
     retry: (failureCount, error) => {
       // Don't retry on 404 (source not found)
+      const axiosError = error as { response?: { status?: number } }
+      if (axiosError?.response?.status === 404) {
+        return false
+      }
+      return failureCount < 3
+    },
+  })
+}
+
+export function usePaperStatusBySource(sourceId: string, enabled = true) {
+  return useQuery({
+    queryKey: ['papermind', 'papers', 'source', sourceId, 'status'],
+    queryFn: () => sourcesApi.getPaperStatusBySource(sourceId),
+    enabled: !!sourceId && enabled,
+    refetchInterval: (query) => {
+      const data = query.state.data as PaperStatusResponse | undefined
+      if (!data?.pipeline_stage) {
+        return 3000
+      }
+      if (data.pipeline_stage === 'done' || data.pipeline_stage === 'failed') {
+        return false
+      }
+      return 3000
+    },
+    staleTime: 0,
+    retry: (failureCount, error) => {
       const axiosError = error as { response?: { status?: number } }
       if (axiosError?.response?.status === 404) {
         return false

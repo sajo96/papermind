@@ -5,6 +5,7 @@ import {
   SourceListResponse,
   SourceDetailResponse,
   SourceResponse,
+  PaperStatusResponse,
   SourceStatusResponse,
   CreateSourceRequest,
   UpdateSourceRequest,
@@ -110,6 +111,20 @@ export const sourcesApi = {
 
   retry: async (id: string) => {
     const response = await apiClient.post<SourceResponse>(`/sources/${id}/retry`)
+    return response.data
+  },
+
+  getPaperStatusBySource: async (sourceId: string) => {
+    const response = await apiClient.get<PaperStatusResponse>(
+      `/papermind/papers/source/${sourceId}/status`
+    )
+    return response.data
+  },
+
+  retryPaperPipeline: async (paperId: string) => {
+    const response = await apiClient.post<{ status: string; paper_id: string }>(
+      `/papermind/papers/${paperId}/retry`
+    )
     return response.data
   },
 

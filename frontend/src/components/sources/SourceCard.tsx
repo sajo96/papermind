@@ -25,7 +25,7 @@ import {
   Loader2,
   Unlink
 } from 'lucide-react'
-import { useSourceStatus } from '@/lib/hooks/use-sources'
+import { usePaperStatusBySource, useSourceStatus } from '@/lib/hooks/use-sources'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { TranslationKeys } from '@/lib/locales'
 import { cn } from '@/lib/utils'
@@ -50,6 +50,16 @@ const SOURCE_TYPE_ICONS = {
   upload: Upload,
   text: FileText,
 } as const
+
+const PIPELINE_STAGE_LABELS: Record<string, string> = {
+  ingesting: 'Ingesting',
+  parsing: 'Parsing',
+  embedding: 'Embedding',
+  notes: 'Generating Notes',
+  graph: 'Building Graph',
+  done: 'Ready',
+  failed: 'Failed',
+}
 
 const getStatusConfig = (t: TranslationKeys) => ({
   new: {
@@ -129,7 +139,7 @@ export function SourceCard({
 }: SourceCardProps) {
   const { t } = useTranslation()
   const statusConfigMap = getStatusConfig(t)
-  
+
   // Only fetch status for sources that might have async processing
   const sourceWithStatus = source as SourceListResponse & { command_id?: string; status?: string }
 
@@ -147,6 +157,7 @@ export function SourceCard({
     source.id,
     shouldFetchStatus
   )
+  const { data: paperStatusData } = usePaperStatusBySource(source.id, shouldFetchStatus)
 
   // Determine current status
   // If source has a command_id but no status, treat as "new" (just created)
@@ -167,7 +178,7 @@ export function SourceCard({
 
     // If we were processing and now completed/failed, trigger refresh and stop polling
     if (wasProcessing &&
-        (currentStatusFromData === 'completed' || currentStatusFromData === 'failed')) {
+      (currentStatusFromData === 'completed' || currentStatusFromData === 'failed')) {
       setWasProcessing(false) // Stop polling
 
       if (onRefresh) {
@@ -175,13 +186,13 @@ export function SourceCard({
       }
     }
   }, [statusData, sourceWithStatus.status, wasProcessing, onRefresh, source.id])
-  
+
   const statusConfig = statusConfigMap[currentStatus] || statusConfigMap.completed
   const StatusIcon = statusConfig.icon
   const sourceType = getSourceType(source)
   const SourceTypeIcon = SOURCE_TYPE_ICONS[sourceType]
-  
-   const title = source.title || t.sources.untitledSource
+
+  const title = source.title || t.sources.untitledSource
 
   const handleRetry = () => {
     if (onRetry) {
@@ -210,6 +221,9 @@ export function SourceCard({
   const isProcessing: boolean = currentStatus === 'new' || currentStatus === 'running' || currentStatus === 'queued' || currentStatus === 'processing'
   const isFailed: boolean = currentStatus === 'failed'
   const isCompleted: boolean = currentStatus === 'completed'
+  const pipelineStage = paperStatusData?.pipeline_stage ?? undefined
+  const pipelineLabel = pipelineStage ? PIPELINE_STAGE_LABELS[pipelineStage] || pipelineStage : null
+  const pipelineError = paperStatusData?.error_message || null
 
   return (
     <Card
@@ -256,6 +270,18 @@ export function SourceCard({
               <p className="text-xs text-gray-600 mb-2 italic">
                 {statusData.message}
               </p>
+            )}
+
+            {pipelineLabel && (
+              <div className="mb-2">
+                <Badge
+                  variant={pipelineStage === 'failed' ? 'destructive' : 'outline'}
+                  className="text-xs"
+                  title={pipelineError || undefined}
+                >
+                  Stage: {pipelineLabel}
+                </Badge>
+              </div>
             )}
 
             {/* Metadata badges */}
@@ -311,52 +337,52 @@ export function SourceCard({
                   <MoreVertical className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
-              {showRemoveFromNotebook && (
-                <>
-                  <DropdownMenuItem
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      handleRemoveFromNotebook()
-                    }}
-                    disabled={!onRemoveFromNotebook}
-                  >
-                    <Unlink className="h-4 w-4 mr-2" />
-                    {t.sources.removeFromNotebook}
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                </>
-              )}
+              <DropdownMenuContent align="end" className="w-48">
+                {showRemoveFromNotebook && (
+                  <>
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleRemoveFromNotebook()
+                      }}
+                      disabled={!onRemoveFromNotebook}
+                    >
+                      <Unlink className="h-4 w-4 mr-2" />
+                      {t.sources.removeFromNotebook}
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                  </>
+                )}
 
-              {isFailed && (
-                <>
-                  <DropdownMenuItem
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      handleRetry()
-                    }}
-                    disabled={!onRetry}
-                  >
-                    <RefreshCw className="h-4 w-4 mr-2" />
-                    {t.sources.retryProcessing}
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                </>
-              )}
+                {isFailed && (
+                  <>
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleRetry()
+                      }}
+                      disabled={!onRetry}
+                    >
+                      <RefreshCw className="h-4 w-4 mr-2" />
+                      {t.sources.retryProcessing}
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                  </>
+                )}
 
-              <DropdownMenuItem
-                onClick={(e) => {
-                  e.stopPropagation()
-                  handleDelete()
-                }}
-                disabled={!onDelete}
-                className="text-red-600 focus:text-red-600"
-              >
-                <Trash2 className="h-4 w-4 mr-2" />
-                {t.sources.deleteSource}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleDelete()
+                  }}
+                  disabled={!onDelete}
+                  className="text-red-600 focus:text-red-600"
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  {t.sources.deleteSource}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
         {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
@@ -379,7 +405,7 @@ export function SourceCard({
         {isProcessing && statusData?.processing_info?.progress && (
           <div className="mt-3 pt-2 border-t">
             <div className="flex justify-between items-center mb-1">
-            <span className="text-xs text-gray-600">{t.common.progress}</span>
+              <span className="text-xs text-gray-600">{t.common.progress}</span>
               <span className="text-xs text-gray-600">
                 {Math.round(statusData.processing_info.progress as number)}%
               </span>

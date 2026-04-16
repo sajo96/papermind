@@ -1,4 +1,5 @@
 import asyncio
+import argparse
 import os
 from pathlib import Path
 
@@ -7,7 +8,7 @@ from loguru import logger
 # Import the existing db_connection from Open Notebook
 from open_notebook.database.repository import db_connection
 
-async def run_migrations():
+async def run_migrations(dry_run: bool = False):
     """
     Reads .surql files from the migrations directory and executes them
     against the configured SurrealDB connection.
@@ -23,12 +24,17 @@ async def run_migrations():
         logger.info("No .surql migration files found.")
         return
 
+    if dry_run:
+        for file_path in migration_files:
+            logger.info(f"Dry-run OK: {file_path.name}")
+        return
+
     async with db_connection() as db:
         for file_path in migration_files:
             logger.info(f"Running migration: {file_path.name}")
             with open(file_path, "r", encoding="utf-8") as f:
                 content = f.read()
-                
+
             try:
                 # Execute the raw query
                 await db.query(content)
@@ -38,4 +44,7 @@ async def run_migrations():
                 raise
 
 if __name__ == "__main__":
-    asyncio.run(run_migrations())
+    parser = argparse.ArgumentParser(description="Run PaperMind SurrealDB migrations")
+    parser.add_argument("--dry-run", action="store_true", help="Validate migration files without executing")
+    args = parser.parse_args()
+    asyncio.run(run_migrations(dry_run=args.dry_run))

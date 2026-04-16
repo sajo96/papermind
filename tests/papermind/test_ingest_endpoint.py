@@ -43,6 +43,9 @@ async def test_ingest_happy_path(client, tmp_path):
     with (
         patch("papermind.api.ingest_routes.repo_query", new_callable=AsyncMock) as mock_repo_query,
         patch("papermind.api.ingest_routes.create_source_record", new_callable=AsyncMock) as mock_create_source,
+        patch("papermind.api.ingest_routes._upsert_ingesting_stub_paper", new_callable=AsyncMock) as mock_stub_paper,
+        patch("papermind.api.ingest_routes.advance_stage", new_callable=AsyncMock) as mock_advance_stage,
+        patch("papermind.api.ingest_routes.mark_done", new_callable=AsyncMock) as mock_mark_done,
         patch("papermind.api.ingest_routes.update_source_status", new_callable=AsyncMock) as mock_update_status,
         patch("papermind.api.ingest_routes._parse_pdf", new_callable=AsyncMock) as mock_parse,
         patch("papermind.api.ingest_routes._save_academic_paper", new_callable=AsyncMock) as mock_save_paper,
@@ -55,6 +58,7 @@ async def test_ingest_happy_path(client, tmp_path):
     ):
         mock_repo_query.return_value = []  # dedup lookup only
         mock_create_source.return_value = "source:1"
+        mock_stub_paper.return_value = SimpleNamespace(id="academic_paper:1")
         mock_parse.return_value = _parsed_paper()
         mock_save_paper.return_value = SimpleNamespace(id="academic_paper:1", authors=[])
         mock_save_atoms.return_value = ["atom:1", "atom:2"]
@@ -92,15 +96,17 @@ async def test_ingest_happy_path(client, tmp_path):
     assert mock_update_status.await_count == 2
     mock_update_status.assert_any_await(
         "source:1",
-        "processing",
+        "running",
         full_text="Abstract body",
     )
     mock_update_status.assert_any_await(
         "source:1",
-        "complete",
+        "completed",
         title="Test Paper",
         full_text="Abstract body",
     )
+    assert mock_advance_stage.await_count >= 5
+    mock_mark_done.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -172,11 +178,15 @@ async def test_ingest_parse_error_sets_parse_error_status(client, tmp_path):
     with (
         patch("papermind.api.ingest_routes.repo_query", new_callable=AsyncMock) as mock_repo_query,
         patch("papermind.api.ingest_routes.create_source_record", new_callable=AsyncMock) as mock_create_source,
+        patch("papermind.api.ingest_routes._upsert_ingesting_stub_paper", new_callable=AsyncMock) as mock_stub_paper,
         patch("papermind.api.ingest_routes._parse_pdf", new_callable=AsyncMock) as mock_parse,
+        patch("papermind.api.ingest_routes.advance_stage", new_callable=AsyncMock),
+        patch("papermind.api.ingest_routes.mark_failed", new_callable=AsyncMock),
         patch("papermind.api.ingest_routes.update_source_status", new_callable=AsyncMock) as mock_update_status,
     ):
         mock_repo_query.return_value = []
         mock_create_source.return_value = "source:1"
+        mock_stub_paper.return_value = SimpleNamespace(id="academic_paper:1")
         mock_parse.side_effect = RuntimeError("corrupt pdf")
 
         response = client.post(
@@ -193,7 +203,7 @@ async def test_ingest_parse_error_sets_parse_error_status(client, tmp_path):
     detail = body["detail"]
     assert detail["error_stage"] == "parse"
     assert detail["status"] == "parse_error"
-    mock_update_status.assert_awaited_once_with("source:1", "parse_error")
+    mock_update_status.assert_awaited_once_with("source:1", "failed")
 
 
 @pytest.mark.asyncio
@@ -203,14 +213,18 @@ async def test_ingest_embed_error_sets_embed_error_status(client, tmp_path):
     with (
         patch("papermind.api.ingest_routes.repo_query", new_callable=AsyncMock) as mock_repo_query,
         patch("papermind.api.ingest_routes.create_source_record", new_callable=AsyncMock) as mock_create_source,
+        patch("papermind.api.ingest_routes._upsert_ingesting_stub_paper", new_callable=AsyncMock) as mock_stub_paper,
         patch("papermind.api.ingest_routes._parse_pdf", new_callable=AsyncMock) as mock_parse,
         patch("papermind.api.ingest_routes._save_academic_paper", new_callable=AsyncMock) as mock_save_paper,
         patch("papermind.api.ingest_routes._save_atoms_to_db", new_callable=AsyncMock) as mock_save_atoms,
         patch("papermind.api.ingest_routes.embedder.embed_batch", new_callable=AsyncMock) as mock_embed_batch,
+        patch("papermind.api.ingest_routes.advance_stage", new_callable=AsyncMock),
+        patch("papermind.api.ingest_routes.mark_failed", new_callable=AsyncMock),
         patch("papermind.api.ingest_routes.update_source_status", new_callable=AsyncMock) as mock_update_status,
     ):
         mock_repo_query.return_value = []
         mock_create_source.return_value = "source:1"
+        mock_stub_paper.return_value = SimpleNamespace(id="academic_paper:1")
         mock_parse.return_value = _parsed_paper()
         mock_save_paper.return_value = SimpleNamespace(id="academic_paper:1", authors=[])
         mock_save_atoms.return_value = ["atom:1"]
@@ -234,4 +248,4 @@ async def test_ingest_embed_error_sets_embed_error_status(client, tmp_path):
     detail = body["detail"]
     assert detail["error_stage"] == "embed"
     assert detail["status"] == "embed_error"
-    mock_update_status.assert_awaited_once_with("source:1", "embed_error")
+    mock_update_status.assert_awaited_once_with("source:1", "failed")

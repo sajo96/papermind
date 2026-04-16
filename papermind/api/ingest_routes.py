@@ -4,6 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any, Literal, Optional
+from datetime import datetime
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from loguru import logger
@@ -17,6 +18,7 @@ from papermind.db.vector_store import vector_store
 from papermind.generators.academic_note_generator import AcademicNoteGenerator
 from papermind.graph.citation_linker import CitationLinker
 from papermind.graph.graph_builder import build_similarity_edges
+from papermind.commands.pipeline_commands import advance_stage, mark_done, mark_failed
 from papermind.models import AcademicPaper, Atom
 from papermind.parsers.academic_pdf_parser import AcademicPDFParser, ParsedPaper
 from papermind.tagging.concept_saver import save_concepts
@@ -51,6 +53,28 @@ class IngestErrorResponse(BaseModel):
     error_stage: str
     detail: str
     status: str
+
+
+class PaperStatusResponse(BaseModel):
+    paper_id: str
+    pipeline_stage: Optional[str]
+    job_status: Optional[str]
+    stage_updated_at: Optional[datetime]
+    error_message: Optional[str]
+
+
+class PaperDetailResponse(BaseModel):
+    id: str
+    source_id: str
+    title: str
+    authors: list[str]
+    abstract: Optional[str]
+    doi: Optional[str]
+    year: Optional[int]
+    keywords: list[str]
+    pipeline_stage: Optional[str]
+    stage_updated_at: Optional[datetime]
+    error_message: Optional[str]
 
 
 def _error_detail(
@@ -135,6 +159,35 @@ async def _save_academic_paper(parsed: ParsedPaper, source_id: str) -> AcademicP
     return paper
 
 
+async def _upsert_ingesting_stub_paper(source_id: str, pdf_path: str) -> AcademicPaper:
+    source_record_id = ensure_record_id(source_id)
+    existing_result = await repo_query(
+        "SELECT * FROM academic_paper WHERE source_id = $source_id LIMIT 1",
+        {"source_id": source_record_id},
+    )
+    existing_rows = _rows_from_query_result(existing_result)
+
+    if existing_rows:
+        paper = AcademicPaper(**existing_rows[0])
+    else:
+        paper = AcademicPaper(
+            source_id=source_record_id,
+            title=Path(pdf_path).stem,
+            authors=[],
+            abstract=None,
+            doi=None,
+            year=None,
+            keywords=[],
+            sections={},
+            raw_references=[],
+        )
+
+    await paper.save()
+    if not paper.id:
+        raise RuntimeError("Failed to upsert ingesting academic paper stub")
+    return paper
+
+
 async def _save_atoms_to_db(atoms: list[Atom]) -> list[str]:
     atom_ids: list[str] = []
     for atom in atoms:
@@ -200,6 +253,20 @@ async def _run_ingest_pipeline(
             notebook_id=notebook_id,
             file_hash=file_hash,
         )
+
+        paper_stub = await _upsert_ingesting_stub_paper(source_id=source_id, pdf_path=pdf_path)
+        await advance_stage(
+            paper_id=str(paper_stub.id),
+            stage="ingesting",
+            source_id=source_id,
+            job_payload={
+                "stage": "ingesting",
+                "source_id": source_id,
+                "paper_id": str(paper_stub.id),
+                "triggered_by": triggered_by,
+                "filename": Path(pdf_path).name,
+            },
+        )
     except Exception as exc:
         logger.exception(f"Ingest failed creating source record for {pdf_path}")
         raise HTTPException(
@@ -209,7 +276,10 @@ async def _run_ingest_pipeline(
 
     try:
         paper, atom_ids, edge_count, tags, note, final_title = await _run_ingest_from_source(
-            source_id, pdf_path
+            source_id,
+            pdf_path,
+            paper_id=str(paper_stub.id),
+            triggered_by=triggered_by,
         )
     except HTTPException:
         raise
@@ -236,15 +306,24 @@ async def _run_ingest_pipeline(
 async def _run_ingest_from_source(
     source_id: str,
     pdf_path: str,
+    paper_id: Optional[str] = None,
+    triggered_by: Literal["upload", "upload_form", "watcher", "manual_scan"] = "upload",
 ) -> tuple[AcademicPaper, list[str], int, list[str], Any, str]:
     """Run the ingest pipeline from parse through finalize, given an existing source."""
 
     # 3. PARSE
     try:
+        await advance_stage(
+            paper_id=paper_id,
+            source_id=source_id,
+            stage="parsing",
+            job_payload={"stage": "parsing", "source_id": source_id, "paper_id": paper_id, "triggered_by": triggered_by},
+        )
         parsed = await _parse_pdf(pdf_path)
     except Exception as exc:
         logger.exception(f"Ingest parse failed for source {source_id}")
         await update_source_status(source_id, "failed")
+        await mark_failed(paper_id=paper_id, source_id=source_id, stage="parsing", error=str(exc))
         raise HTTPException(
             status_code=422,
             detail=_error_detail(source_id, "parse", str(exc), "parse_error"),
@@ -258,6 +337,7 @@ async def _run_ingest_from_source(
     except Exception as exc:
         logger.exception(f"Ingest paper save failed for source {source_id}")
         await update_source_status(source_id, "failed")
+        await mark_failed(paper_id=paper_id, source_id=source_id, stage="parsing", error=str(exc))
         raise HTTPException(
             status_code=500,
             detail=_error_detail(source_id, "paper", str(exc), "paper_error"),
@@ -265,6 +345,12 @@ async def _run_ingest_from_source(
 
     # 5. ATOMIZE + EMBED
     try:
+        await advance_stage(
+            paper_id=paper_id,
+            source_id=source_id,
+            stage="embedding",
+            job_payload={"stage": "embedding", "source_id": source_id, "paper_id": paper_id, "triggered_by": triggered_by},
+        )
         atoms = chunk_paper_into_atoms(parsed, paper_id)
         atom_ids = await _save_atoms_to_db(atoms)
         embeddings = await embedder.embed_batch([atom.content for atom in atoms]) if atoms else []
@@ -278,40 +364,36 @@ async def _run_ingest_from_source(
     except Exception as exc:
         logger.exception(f"Ingest embed failed for source {source_id}")
         await update_source_status(source_id, "failed")
+        await mark_failed(paper_id=paper_id, source_id=source_id, stage="embedding", error=str(exc))
         raise HTTPException(
             status_code=500,
             detail=_error_detail(source_id, "embed", str(exc), "embed_error"),
-        )
-
-    # 6. SIMILARITY EDGES
-    try:
-        edge_count = await build_similarity_edges(paper_id)
-        logger.info(f"Built {edge_count} similarity edges for paper {paper_id}")
-    except Exception as exc:
-        logger.exception(f"Ingest similarity edge build failed for source {source_id}")
-        await update_source_status(source_id, "failed")
-        raise HTTPException(
-            status_code=500,
-            detail=_error_detail(source_id, "graph", str(exc), "graph_error"),
         )
 
     # 6b. STORE FULL TEXT (needed by note generator's _source_full_text fallback)
     if parsed.raw_text:
         await update_source_status(source_id, "running", full_text=parsed.raw_text)
 
-    # 7. NOTE GENERATION
+    # 6. NOTE GENERATION
     try:
+        await advance_stage(
+            paper_id=paper_id,
+            source_id=source_id,
+            stage="notes",
+            job_payload={"stage": "notes", "source_id": source_id, "paper_id": paper_id, "triggered_by": triggered_by},
+        )
         note = await note_generator.generate_note(paper, raw_text=parsed.raw_text or "")
         logger.info(f"Generated note {note.note_id} for paper {paper_id}")
     except Exception as exc:
         logger.exception(f"Ingest note generation failed for source {source_id}")
         await update_source_status(source_id, "failed")
+        await mark_failed(paper_id=paper_id, source_id=source_id, stage="notes", error=str(exc))
         raise HTTPException(
             status_code=500,
             detail=_error_detail(source_id, "note", str(exc), "note_error"),
         )
 
-    # 8. SAVE CONCEPTS
+    # 7. SAVE CONCEPTS
     try:
         tags = await save_concepts(
             paper_id=paper_id,
@@ -323,9 +405,29 @@ async def _run_ingest_from_source(
     except Exception as exc:
         logger.exception(f"Ingest concept save failed for source {source_id}")
         await update_source_status(source_id, "failed")
+        await mark_failed(paper_id=paper_id, source_id=source_id, stage="notes", error=str(exc))
         raise HTTPException(
             status_code=500,
             detail=_error_detail(source_id, "tag", str(exc), "tag_error"),
+        )
+
+    # 8. SIMILARITY EDGES
+    try:
+        await advance_stage(
+            paper_id=paper_id,
+            source_id=source_id,
+            stage="graph",
+            job_payload={"stage": "graph", "source_id": source_id, "paper_id": paper_id, "triggered_by": triggered_by},
+        )
+        edge_count = await build_similarity_edges(paper_id)
+        logger.info(f"Built {edge_count} similarity edges for paper {paper_id}")
+    except Exception as exc:
+        logger.exception(f"Ingest similarity edge build failed for source {source_id}")
+        await update_source_status(source_id, "failed")
+        await mark_failed(paper_id=paper_id, source_id=source_id, stage="graph", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail(source_id, "graph", str(exc), "graph_error"),
         )
 
     # 9. CITATION LINKING
@@ -342,6 +444,7 @@ async def _run_ingest_from_source(
         title=final_title,
         full_text=parsed.raw_text,
     )
+    await mark_done(paper_id=paper_id, source_id=source_id)
     return paper, atom_ids, edge_count, tags, note, final_title
 
 
@@ -519,6 +622,20 @@ async def upload_and_ingest_async(
             title=file.filename,
         )
 
+        paper_stub = await _upsert_ingesting_stub_paper(source_id=source_id, pdf_path=temp_file_path)
+        await advance_stage(
+            paper_id=str(paper_stub.id),
+            stage="ingesting",
+            source_id=source_id,
+            job_payload={
+                "stage": "ingesting",
+                "source_id": source_id,
+                "paper_id": str(paper_stub.id),
+                "triggered_by": triggered_by,
+                "filename": file.filename,
+            },
+        )
+
         asyncio.create_task(
             _continue_ingest_background(
                 source_id=source_id,
@@ -627,3 +744,122 @@ async def diagnostics_llm():
         diag["provision_ok"] = False
 
     return diag
+
+
+def _normalize_paper_id(paper_id: str) -> str:
+    return paper_id if ":" in paper_id else f"academic_paper:{paper_id}"
+
+
+async def _get_paper_by_id_or_404(paper_id: str) -> AcademicPaper:
+    normalized_id = _normalize_paper_id(paper_id)
+    paper = await AcademicPaper.get(normalized_id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    return paper
+
+
+@ingest_router.get(
+    "/papers/{paper_id}",
+    response_model=PaperDetailResponse,
+    summary="Get paper detail with pipeline stage",
+)
+async def get_paper_detail(paper_id: str):
+    paper = await _get_paper_by_id_or_404(paper_id)
+    return PaperDetailResponse(
+        id=str(paper.id),
+        source_id=str(paper.source_id),
+        title=paper.title,
+        authors=paper.authors,
+        abstract=paper.abstract,
+        doi=paper.doi,
+        year=paper.year,
+        keywords=paper.keywords,
+        pipeline_stage=paper.pipeline_stage,
+        stage_updated_at=paper.stage_updated_at,
+        error_message=paper.error_message,
+    )
+
+
+@ingest_router.get(
+    "/papers/{paper_id}/status",
+    response_model=PaperStatusResponse,
+    summary="Get real-time pipeline status for a paper",
+)
+async def get_paper_status(paper_id: str):
+    paper = await _get_paper_by_id_or_404(paper_id)
+    progress = await paper.get_processing_progress()
+    return PaperStatusResponse(
+        paper_id=str(paper.id),
+        pipeline_stage=progress["pipeline_stage"],
+        job_status=progress["job_status"],
+        stage_updated_at=progress["stage_updated_at"],
+        error_message=progress["error_message"],
+    )
+
+
+@ingest_router.get(
+    "/papers/source/{source_id}/status",
+    response_model=PaperStatusResponse,
+    summary="Get real-time pipeline status by source ID",
+)
+async def get_paper_status_by_source(source_id: str):
+    rows_raw = await repo_query(
+        "SELECT * FROM academic_paper WHERE source_id = $source_id LIMIT 1",
+        {"source_id": ensure_record_id(source_id)},
+    )
+    rows = _rows_from_query_result(rows_raw)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Paper not found for source")
+
+    paper = AcademicPaper(**rows[0])
+    progress = await paper.get_processing_progress()
+    return PaperStatusResponse(
+        paper_id=str(paper.id),
+        pipeline_stage=progress["pipeline_stage"],
+        job_status=progress["job_status"],
+        stage_updated_at=progress["stage_updated_at"],
+        error_message=progress["error_message"],
+    )
+
+
+@ingest_router.post("/papers/{paper_id}/retry")
+async def retry_paper_pipeline(paper_id: str):
+    paper = await _get_paper_by_id_or_404(paper_id)
+    source_rows = _rows_from_query_result(
+        await repo_query(
+            "SELECT asset FROM source WHERE id = $source_id LIMIT 1",
+            {"source_id": ensure_record_id(str(paper.source_id))},
+        )
+    )
+    asset = source_rows[0].get("asset") if source_rows else None
+    file_path = asset.get("file_path") if isinstance(asset, dict) else None
+
+    if not file_path or not Path(file_path).exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Retry requires an existing source file path",
+        )
+
+    await advance_stage(
+        paper_id=str(paper.id),
+        source_id=str(paper.source_id),
+        stage="ingesting",
+        job_payload={
+            "stage": "ingesting",
+            "source_id": str(paper.source_id),
+            "paper_id": str(paper.id),
+            "triggered_by": "retry",
+            "filename": Path(file_path).name,
+        },
+    )
+
+    asyncio.create_task(
+        _run_ingest_from_source(
+            source_id=str(paper.source_id),
+            pdf_path=file_path,
+            paper_id=str(paper.id),
+            triggered_by="manual_scan",
+        )
+    )
+
+    return {"status": "retrying", "paper_id": str(paper.id)}

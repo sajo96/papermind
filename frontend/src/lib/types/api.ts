@@ -143,6 +143,14 @@ export interface IngestErrorResponse {
   status: string
 }
 
+export interface PaperStatusResponse {
+  paper_id: string
+  pipeline_stage?: 'ingesting' | 'parsing' | 'embedding' | 'notes' | 'graph' | 'done' | 'failed' | null
+  job_status?: 'pending' | 'queued' | 'running' | 'done' | 'failed' | 'unknown' | null
+  stage_updated_at?: string | null
+  error_message?: string | null
+}
+
 export interface APIError {
   detail: string
 }

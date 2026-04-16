@@ -1,0 +1,3 @@
+-- Correct command field type for PaperMind pipeline tracking.
+-- 002_status_fields initially used record<commands>, but surreal-commands IDs are command:...
+DEFINE FIELD command ON academic_paper TYPE option<record<command>>;
