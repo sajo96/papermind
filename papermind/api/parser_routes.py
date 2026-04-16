@@ -1,6 +1,7 @@
 import os
 import re
 import httpx
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from loguru import logger
@@ -13,7 +14,7 @@ from open_notebook.domain.notebook import Source
 from open_notebook.database.repository import ensure_record_id, repo_query
 from papermind.utils import _rows_from_query_result, safe_error_detail
 
-router = APIRouter(prefix="/papermind/parse_academic", tags=["papermind-parser"])
+router = APIRouter(prefix="/papermind", tags=["papermind-parser"])
 
 # Use port 5055 by default since this might run in the background worker or fastapi app
 API_BASE = os.environ.get("PAPERMIND_API_BASE", "http://localhost:5055")
@@ -71,7 +72,7 @@ def _extract_pdf_text_fallback(file_path: str) -> str:
         return ""
 
 
-@router.post("", response_model=ParseResponse)
+@router.post("/parse_academic", response_model=ParseResponse)
 async def parse_academic_paper(req: ParseRequest, background_tasks: BackgroundTasks):
     try:
         source = await Source.get(req.source_id)
@@ -162,3 +163,26 @@ async def parse_academic_paper(req: ParseRequest, background_tasks: BackgroundTa
     except Exception as e:
         logger.exception("Failed to parse academic pdf")
         raise HTTPException(status_code=500, detail=safe_error_detail(str(e)))
+
+
+class PaperStatusResponse(BaseModel):
+    paper_id: str
+    pipeline_stage: str | None
+    job_status: str | None
+    stage_updated_at: datetime | None
+    error_message: str | None
+
+
+@router.get("/papers/{paper_id}/status", response_model=PaperStatusResponse)
+async def get_paper_status(paper_id: str):
+    paper = await AcademicPaper.get(paper_id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    progress = await paper.get_processing_progress()
+    return PaperStatusResponse(
+        paper_id=paper_id,
+        pipeline_stage=progress["pipeline_stage"],
+        job_status=progress["job_status"],
+        stage_updated_at=progress["stage_updated_at"],
+        error_message=progress["error_message"],
+    )
