@@ -12,7 +12,6 @@ import {
   SourceStatusResponse,
   SourceListResponse,
   IngestResponse,
-  IngestAsyncResponse,
 } from '@/lib/types/api'
 
 const NOTEBOOK_SOURCES_PAGE_SIZE = 30
@@ -95,11 +94,7 @@ export function useCreateSource() {
 
   // Helper function to check if result is IngestResponse
   const isIngestResponse = (result: unknown): result is IngestResponse => {
-    return result && typeof result === 'object' && 'paper_id' in result && 'atom_count' in result
-  }
-
-  const isIngestAsyncResponse = (result: unknown): result is IngestAsyncResponse => {
-    return result && typeof result === 'object' && 'job_id' in result && 'status' in result
+    return Boolean(result && typeof result === 'object' && 'paper_id' in result && 'atom_count' in result)
   }
 
   // Helper function to get notebook IDs from request
@@ -129,8 +124,8 @@ export function useCreateSource() {
   }
 
   return useMutation({
-    mutationFn: (data: CreateSourceRequest) => sourcesApi.create(data),
-    onSuccess: (result: SourceResponse | IngestResponse | IngestAsyncResponse, variables) => {
+    mutationFn: (data: CreateSourceRequest) => sourcesApi.create(data) as Promise<SourceResponse | IngestResponse>,
+    onSuccess: (result: SourceResponse | IngestResponse, variables) => {
       const notebookIds = getNotebookIds(variables)
 
       // Invalidate queries for all relevant notebooks with immediate refetch
@@ -166,14 +161,6 @@ export function useCreateSource() {
             description: t.sources.sourceQueuedDesc || `Ingesting ${result.title}...`,
           })
         }
-        return
-      }
-
-      if (isIngestAsyncResponse(result)) {
-        toast({
-          title: t.sources.sourceQueued || 'Paper queued',
-          description: t.sources.sourceQueuedDesc || `Started processing ${result.paper_name}`,
-        })
         return
       }
 

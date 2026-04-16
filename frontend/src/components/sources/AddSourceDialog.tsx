@@ -24,9 +24,7 @@ import { useTransformations } from '@/lib/hooks/use-transformations'
 import { useCreateSource } from '@/lib/hooks/use-sources'
 import { useSettings } from '@/lib/hooks/use-settings'
 import { CreateSourceRequest } from '@/lib/types/api'
-import { IngestAsyncResponse } from '@/lib/types/api'
 import { useTranslation } from '@/lib/hooks/use-translation'
-import { STAGE_PROGRESS, useUploadStore } from '@/lib/stores/upload-store'
 
 const MAX_BATCH_SIZE = 50
 
@@ -94,11 +92,6 @@ export function AddSourceDialog({
   defaultNotebookId
 }: AddSourceDialogProps) {
   const { t } = useTranslation()
-  const { addJob } = useUploadStore()
-
-  const isIngestAsyncResponse = (result: unknown): result is IngestAsyncResponse => {
-    return !!result && typeof result === 'object' && 'job_id' in result && 'paper_name' in result
-  }
 
   const WIZARD_STEPS: readonly WizardStep[] = [
     { number: 1, title: t.sources.addSource, description: t.sources.processDescription },
@@ -305,7 +298,7 @@ export function AddSourceDialog({
   }
 
   // Single source submission
-  const submitSingleSource = async (data: CreateSourceFormData): Promise<unknown> => {
+  const submitSingleSource = async (data: CreateSourceFormData): Promise<void> => {
     const createRequest: CreateSourceRequest = {
       type: data.type,
       notebooks: selectedNotebooks,
@@ -324,7 +317,7 @@ export function AddSourceDialog({
       requestWithFile.file = file
     }
 
-    return await createSource.mutateAsync(createRequest)
+    await createSource.mutateAsync(createRequest)
   }
 
   // Batch submission
@@ -374,17 +367,6 @@ export function AddSourceDialog({
         }
 
         const result = await createSource.mutateAsync(createRequest)
-        if (isIngestAsyncResponse(result)) {
-          addJob({
-            id: result.job_id,
-            paperName: result.paper_name,
-            notebookId: result.notebook_id,
-            sourceId: null,
-            trigger: 'manual',
-            stage: result.stage,
-            progress: result.progress ?? STAGE_PROGRESS.uploading,
-          })
-        }
         results.success++
       } catch (error) {
         console.error(`Error creating source for ${itemLabel}:`, error)
@@ -424,18 +406,7 @@ export function AddSourceDialog({
       } else {
         // Single source submission
         setProcessingStatus({ message: t.sources.submittingSource })
-        const result = await submitSingleSource(data)
-        if (isIngestAsyncResponse(result)) {
-          addJob({
-            id: result.job_id,
-            paperName: result.paper_name,
-            notebookId: result.notebook_id,
-            sourceId: null,
-            trigger: 'manual',
-            stage: result.stage,
-            progress: result.progress ?? STAGE_PROGRESS.uploading,
-          })
-        }
+        await submitSingleSource(data)
         handleClose()
       }
     } catch (error) {

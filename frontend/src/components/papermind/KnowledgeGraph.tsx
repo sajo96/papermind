@@ -1,12 +1,11 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { Loader2 } from "lucide-react";
 import PaperPanel from "./PaperPanel";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { GraphNode, GraphData } from "./types";
 import KnowledgeGraphSigmaCanvas from "./KnowledgeGraphSigmaCanvas";
-import { useUploadStore } from "@/lib/stores/upload-store";
 export default function KnowledgeGraph({ notebookId }: { notebookId: string }) {
     const [minSim, setMinSim] = useState<number>(0.75);
     const [minSharedConcepts, setMinSharedConcepts] = useState<number>(2);
@@ -15,8 +14,6 @@ export default function KnowledgeGraph({ notebookId }: { notebookId: string }) {
     const [showEdgeLabels, setShowEdgeLabels] = useState<boolean>(false);
     const [edgeMode, setEdgeMode] = useState<"concept_similarity" | "cites" | "similar_to">("concept_similarity");
     const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
-    const queryClient = useQueryClient();
-    const { jobs, markAddedToGraph } = useUploadStore();
 
     const normalizedNotebookId = useMemo(() => {
         // Route params may already be URL-encoded (e.g. notebook%3Aabc).
@@ -44,22 +41,9 @@ export default function KnowledgeGraph({ notebookId }: { notebookId: string }) {
     const { data, isLoading, error } = useQuery<GraphData>({
         queryKey: ["notebookGraph", normalizedNotebookId, minSim, minSharedConcepts, conceptFilter],
         queryFn: fetchGraphData,
+        staleTime: 30 * 1000,
+        refetchOnWindowFocus: true,
     });
-
-    const notebookJobs = useMemo(
-        () => jobs.filter((job) => job.notebookId === normalizedNotebookId),
-        [jobs, normalizedNotebookId]
-    );
-
-    useEffect(() => {
-        const justCompleted = notebookJobs.filter((job) => job.stage === "complete" && !job.addedToGraph);
-        if (justCompleted.length === 0) return;
-
-        queryClient.invalidateQueries({
-            queryKey: ["notebookGraph", normalizedNotebookId],
-        });
-        justCompleted.forEach((job) => markAddedToGraph(job.id));
-    }, [markAddedToGraph, normalizedNotebookId, notebookJobs, queryClient]);
 
     const uniqueConcepts = useMemo(() => {
         const metaConcepts = (data?.meta?.concept_options as string[] | undefined) || [];

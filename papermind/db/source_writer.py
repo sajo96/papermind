@@ -45,7 +45,7 @@ async def create_source_record(
             type: "pdf",
             file_hash: $file_hash,
             notebook_id: $notebook_id,
-            status: "processing",
+            status: "running",
             created_at: time::now()
         }
         """,

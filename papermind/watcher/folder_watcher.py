@@ -70,7 +70,7 @@ async def ingest_pdf(pdf_path: str, notebook_id: str):
         if res.status_code == 200:
             logger.info(
                 f"Queued watcher ingest for {Path(pdf_path).name} "
-                f"(job_id={data.get('job_id', 'unknown')})"
+                f"(source_id={data.get('source_id', 'unknown')})"
             )
             return
 

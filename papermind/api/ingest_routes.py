@@ -17,7 +17,6 @@ from papermind.db.vector_store import vector_store
 from papermind.generators.academic_note_generator import AcademicNoteGenerator
 from papermind.graph.citation_linker import CitationLinker
 from papermind.graph.graph_builder import build_similarity_edges
-from papermind.api.progress_state import progress_registry
 from papermind.models import AcademicPaper, Atom
 from papermind.parsers.academic_pdf_parser import AcademicPDFParser, ParsedPaper
 from papermind.tagging.concept_saver import save_concepts
@@ -52,15 +51,6 @@ class IngestErrorResponse(BaseModel):
     error_stage: str
     detail: str
     status: str
-
-
-class IngestAsyncResponse(BaseModel):
-    job_id: str
-    notebook_id: str
-    paper_name: str
-    stage: str
-    progress: int
-    status: Literal["queued"]
 
 
 def _error_detail(
@@ -168,14 +158,11 @@ async def _run_ingest_pipeline(
     pdf_path: str,
     notebook_id: str,
     triggered_by: Literal["upload", "upload_form", "watcher", "manual_scan"],
-    progress_job_id: Optional[str] = None,
 ) -> IngestResponse:
     logger.info(
         f"Starting ingest pipeline for {pdf_path} "
         f"(notebook_id={notebook_id}, triggered_by={triggered_by})"
     )
-    if progress_job_id:
-        progress_registry.update_job(progress_job_id, stage="parsing")
 
     # 1. DEDUP
     try:
@@ -195,12 +182,6 @@ async def _run_ingest_pipeline(
     )
     if existing_rows:
         logger.info(f"Duplicate ingest skipped for {pdf_path}")
-        if progress_job_id:
-            progress_registry.update_job(
-                progress_job_id,
-                stage="complete",
-                source_id=str(existing_rows[0].get("id")),
-            )
         return IngestResponse(
             source_id=str(existing_rows[0].get("id")),
             paper_id="",
@@ -219,38 +200,51 @@ async def _run_ingest_pipeline(
             notebook_id=notebook_id,
             file_hash=file_hash,
         )
-        if progress_job_id:
-            progress_registry.update_job(
-                progress_job_id,
-                stage="parsing",
-                source_id=source_id,
-            )
     except Exception as exc:
         logger.exception(f"Ingest failed creating source record for {pdf_path}")
-        if progress_job_id:
-            progress_registry.update_job(
-                progress_job_id,
-                stage="error",
-                error_message=str(exc),
-            )
         raise HTTPException(
             status_code=500,
             detail=_error_detail(None, "source", str(exc), "source_error"),
         )
+
+    try:
+        paper, atom_ids, edge_count, tags, note, final_title = await _run_ingest_from_source(
+            source_id, pdf_path
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(f"Ingest failed for source {source_id}")
+        await update_source_status(source_id, "failed")
+        raise HTTPException(
+            status_code=500,
+            detail=_error_detail(source_id, "pipeline", str(exc), "pipeline_error"),
+        )
+
+    return IngestResponse(
+        source_id=source_id,
+        paper_id=str(paper.id),
+        title=final_title,
+        atom_count=len(atom_ids),
+        similarity_edge_count=edge_count,
+        tag_count=len(tags),
+        note_id=note.note_id or "",
+        status="complete",
+    )
+
+
+async def _run_ingest_from_source(
+    source_id: str,
+    pdf_path: str,
+) -> tuple[AcademicPaper, list[str], int, list[str], Any, str]:
+    """Run the ingest pipeline from parse through finalize, given an existing source."""
 
     # 3. PARSE
     try:
         parsed = await _parse_pdf(pdf_path)
     except Exception as exc:
         logger.exception(f"Ingest parse failed for source {source_id}")
-        await update_source_status(source_id, "parse_error")
-        if progress_job_id:
-            progress_registry.update_job(
-                progress_job_id,
-                stage="error",
-                source_id=source_id,
-                error_message=str(exc),
-            )
+        await update_source_status(source_id, "failed")
         raise HTTPException(
             status_code=422,
             detail=_error_detail(source_id, "parse", str(exc), "parse_error"),
@@ -263,14 +257,7 @@ async def _run_ingest_pipeline(
         logger.info(f"Saved academic_paper {paper_id} for source {source_id}")
     except Exception as exc:
         logger.exception(f"Ingest paper save failed for source {source_id}")
-        await update_source_status(source_id, "paper_error")
-        if progress_job_id:
-            progress_registry.update_job(
-                progress_job_id,
-                stage="error",
-                source_id=source_id,
-                error_message=str(exc),
-            )
+        await update_source_status(source_id, "failed")
         raise HTTPException(
             status_code=500,
             detail=_error_detail(source_id, "paper", str(exc), "paper_error"),
@@ -278,12 +265,8 @@ async def _run_ingest_pipeline(
 
     # 5. ATOMIZE + EMBED
     try:
-        if progress_job_id:
-            progress_registry.update_job(progress_job_id, stage="atomizing", source_id=source_id)
         atoms = chunk_paper_into_atoms(parsed, paper_id)
         atom_ids = await _save_atoms_to_db(atoms)
-        if progress_job_id:
-            progress_registry.update_job(progress_job_id, stage="embedding", source_id=source_id)
         embeddings = await embedder.embed_batch([atom.content for atom in atoms]) if atoms else []
 
         for atom, embedding in zip(atoms, embeddings):
@@ -294,14 +277,7 @@ async def _run_ingest_pipeline(
             vector_store.upsert(str(atom.id), embedding)
     except Exception as exc:
         logger.exception(f"Ingest embed failed for source {source_id}")
-        await update_source_status(source_id, "embed_error")
-        if progress_job_id:
-            progress_registry.update_job(
-                progress_job_id,
-                stage="error",
-                source_id=source_id,
-                error_message=str(exc),
-            )
+        await update_source_status(source_id, "failed")
         raise HTTPException(
             status_code=500,
             detail=_error_detail(source_id, "embed", str(exc), "embed_error"),
@@ -313,14 +289,7 @@ async def _run_ingest_pipeline(
         logger.info(f"Built {edge_count} similarity edges for paper {paper_id}")
     except Exception as exc:
         logger.exception(f"Ingest similarity edge build failed for source {source_id}")
-        await update_source_status(source_id, "graph_error")
-        if progress_job_id:
-            progress_registry.update_job(
-                progress_job_id,
-                stage="error",
-                source_id=source_id,
-                error_message=str(exc),
-            )
+        await update_source_status(source_id, "failed")
         raise HTTPException(
             status_code=500,
             detail=_error_detail(source_id, "graph", str(exc), "graph_error"),
@@ -328,24 +297,15 @@ async def _run_ingest_pipeline(
 
     # 6b. STORE FULL TEXT (needed by note generator's _source_full_text fallback)
     if parsed.raw_text:
-        await update_source_status(source_id, "processing", full_text=parsed.raw_text)
+        await update_source_status(source_id, "running", full_text=parsed.raw_text)
 
     # 7. NOTE GENERATION
     try:
-        if progress_job_id:
-            progress_registry.update_job(progress_job_id, stage="note_generating", source_id=source_id)
         note = await note_generator.generate_note(paper, raw_text=parsed.raw_text or "")
         logger.info(f"Generated note {note.note_id} for paper {paper_id}")
     except Exception as exc:
         logger.exception(f"Ingest note generation failed for source {source_id}")
-        await update_source_status(source_id, "note_error")
-        if progress_job_id:
-            progress_registry.update_job(
-                progress_job_id,
-                stage="error",
-                source_id=source_id,
-                error_message=str(exc),
-            )
+        await update_source_status(source_id, "failed")
         raise HTTPException(
             status_code=500,
             detail=_error_detail(source_id, "note", str(exc), "note_error"),
@@ -362,14 +322,7 @@ async def _run_ingest_pipeline(
         logger.info(f"Saved {len(tags)} concepts for paper {paper_id}")
     except Exception as exc:
         logger.exception(f"Ingest concept save failed for source {source_id}")
-        await update_source_status(source_id, "tag_error")
-        if progress_job_id:
-            progress_registry.update_job(
-                progress_job_id,
-                stage="error",
-                source_id=source_id,
-                error_message=str(exc),
-            )
+        await update_source_status(source_id, "failed")
         raise HTTPException(
             status_code=500,
             detail=_error_detail(source_id, "tag", str(exc), "tag_error"),
@@ -385,59 +338,31 @@ async def _run_ingest_pipeline(
     final_title = _normalize_ingest_title(parsed.title, pdf_path)
     await update_source_status(
         source_id,
-        "complete",
+        "completed",
         title=final_title,
         full_text=parsed.raw_text,
     )
-    if progress_job_id:
-        progress_registry.update_job(
-            progress_job_id,
-            stage="complete",
-            source_id=source_id,
-        )
-    return IngestResponse(
-        source_id=source_id,
-        paper_id=paper_id,
-        title=final_title,
-        atom_count=len(atom_ids),
-        similarity_edge_count=edge_count,
-        tag_count=len(tags),
-        note_id=note.note_id or "",
-        status="complete",
-    )
+    return paper, atom_ids, edge_count, tags, note, final_title
 
 
-async def _run_ingest_job(
-    job_id: str,
+async def _continue_ingest_background(
+    source_id: str,
     pdf_path: str,
-    notebook_id: str,
     triggered_by: Literal["upload", "upload_form", "watcher", "manual_scan"],
-    cleanup_file: bool = False,
 ):
+    """Background task that continues the ingest pipeline after source creation."""
     try:
-        await _run_ingest_pipeline(
-            pdf_path=pdf_path,
-            notebook_id=notebook_id,
-            triggered_by=triggered_by,
-            progress_job_id=job_id,
-        )
-    except HTTPException as exc:
-        detail = exc.detail if isinstance(exc.detail, dict) else {"detail": str(exc.detail)}
-        progress_registry.update_job(
-            job_id,
-            stage="error",
-            source_id=detail.get("source_id"),
-            error_message=str(detail.get("detail") or "Ingest failed"),
-        )
+        await _run_ingest_from_source(source_id, pdf_path)
+        logger.info(f"Background ingest completed for source {source_id}")
     except Exception as exc:
-        progress_registry.update_job(job_id, stage="error", error_message=str(exc))
-        logger.exception(f"Unhandled ingest job failure for job {job_id}")
+        logger.exception(f"Background ingest failed for source {source_id}: {exc}")
+        await update_source_status(source_id, "failed")
     finally:
-        if cleanup_file and pdf_path and os.path.exists(pdf_path):
+        if pdf_path and os.path.exists(pdf_path):
             try:
                 os.remove(pdf_path)
             except OSError as cleanup_exc:
-                logger.warning(f"Failed to cleanup temp upload file {pdf_path}: {cleanup_exc}")
+                logger.warning(f"Failed to cleanup temp file {pdf_path}: {cleanup_exc}")
 
 
 @ingest_router.post(
@@ -522,13 +447,11 @@ async def upload_and_ingest(
             try:
                 os.remove(temp_file_path)
             except OSError as exc:
-                logger.warning(f"Failed to cleanup temp upload file {temp_file_path}: {exc}")
+                logger.warning(f"Failed to cleanup temp file {temp_file_path}: {exc}")
 
 
 @ingest_router.post(
     "/upload-async",
-    response_model=IngestAsyncResponse,
-    responses={422: {"model": IngestErrorResponse}, 500: {"model": IngestErrorResponse}},
 )
 async def upload_and_ingest_async(
     file: UploadFile = File(...),
@@ -577,36 +500,40 @@ async def upload_and_ingest_async(
                 first_chunk = False
                 temp_file.write(chunk)
 
-        trigger = "watcher" if triggered_by == "watcher" else "manual"
-        job = progress_registry.create_job(
-            notebook_id=notebook_id,
-            paper_name=file.filename,
-            trigger=trigger,
+        # Create source record in the handler so it appears immediately with "running" status.
+        file_hash = _compute_file_hash(temp_file_path)
+
+        existing_rows = _rows_from_query_result(
+            await repo_query(
+                "SELECT id FROM source WHERE file_hash = $file_hash LIMIT 1",
+                {"file_hash": file_hash},
+            )
         )
+        if existing_rows:
+            return {"source_id": str(existing_rows[0].get("id")), "status": "duplicate"}
+
+        source_id = await create_source_record(
+            pdf_path=temp_file_path,
+            notebook_id=notebook_id,
+            file_hash=file_hash,
+            title=file.filename,
+        )
+
         asyncio.create_task(
-            _run_ingest_job(
-                job_id=job.id,
+            _continue_ingest_background(
+                source_id=source_id,
                 pdf_path=temp_file_path,
-                notebook_id=notebook_id,
                 triggered_by=triggered_by,
-                cleanup_file=True,
             )
         )
 
-        return IngestAsyncResponse(
-            job_id=job.id,
-            notebook_id=job.notebook_id,
-            paper_name=job.paper_name,
-            stage=job.stage,
-            progress=job.progress,
-            status="queued",
-        )
+        return {"source_id": source_id, "status": "running"}
     except HTTPException:
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.remove(temp_file_path)
             except OSError as exc:
-                logger.warning(f"Failed to cleanup temp upload file {temp_file_path}: {exc}")
+                logger.warning(f"Failed to cleanup temp file {temp_file_path}: {exc}")
         raise
     finally:
         await file.close()

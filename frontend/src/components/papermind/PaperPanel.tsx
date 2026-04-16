@@ -50,6 +50,34 @@ export default function PaperPanel({
     const internalPaperId = paperNode.id;
 
     const fetchPaperNote = async () => {
+        // Check if the paper's source is still being processed — don't
+        // trigger a second generation while the pipeline is running.
+        try {
+            const statusRes = await fetch(
+                `/api/sources?notebook_id=${encodeURIComponent(notebookId)}`
+            );
+            if (statusRes.ok) {
+                const sources = await statusRes.json();
+                const paperSource = (Array.isArray(sources)
+                    ? sources.find(
+                        (s: Record<string, unknown>) =>
+                            s.title === paperNode.label ||
+                            s.id === paperNode.id
+                    )
+                    : null) as Record<string, unknown> | null;
+                if (
+                    paperSource &&
+                    (paperSource.status === "running" ||
+                        paperSource.status === "new" ||
+                        paperSource.status === "queued")
+                ) {
+                    return null;
+                }
+            }
+        } catch {
+            // Ignore — fall through to normal fetch
+        }
+
         const res = await fetch(`/api/papermind/note/${encodeURIComponent(internalPaperId)}`);
         if (res.status === 404) {
             const generateRes = await fetch('/api/papermind/generate_note', {

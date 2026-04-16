@@ -120,7 +120,7 @@ async def get_notebook_graph(
             "source_id IN ("
             "SELECT VALUE id FROM source "
             "WHERE id IN (SELECT VALUE in FROM reference WHERE out = $notebook_id) "
-            "AND status = 'complete'"
+            "AND (status = 'complete' OR status = 'completed' OR status IS NONE)"
             ")"
         ]
         params: Dict[str, Any] = {"notebook_id": nb_record_id}
@@ -151,7 +151,7 @@ async def get_notebook_graph(
         SELECT id, title, (SELECT count() FROM source_embedding WHERE source = $parent.id) as chunk_count
         FROM source 
         WHERE id IN (SELECT VALUE in FROM reference WHERE out = $notebook_id)
-                    AND status = 'complete'
+                    AND (status = 'complete' OR status = 'completed' OR status IS NONE)
         """
         plain_sources_result = await repo_query(sources_query, {"notebook_id": nb_record_id})
         plain_sources = _rows_from_query_result(plain_sources_result)
