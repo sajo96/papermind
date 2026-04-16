@@ -310,7 +310,23 @@ async def generate_note(request: GenerateNoteRequest) -> dict:
 
     # 3. Generate note
     try:
-        generated = await note_generator.generate_note(paper)
+        # Fetch raw_text from the linked source record as fallback content
+        raw_text = ""
+        try:
+            source_id = getattr(paper, "source_id", None)
+            if source_id:
+                src_rows = _rows_from_query_result(
+                    await repo_query(
+                        "SELECT full_text FROM $id",
+                        {"id": ensure_record_id(str(source_id))},
+                    )
+                )
+                if src_rows and isinstance(src_rows[0], dict):
+                    raw_text = str(src_rows[0].get("full_text") or "")
+        except Exception:
+            pass
+
+        generated = await note_generator.generate_note(paper, raw_text=raw_text)
         if hasattr(generated, "dict"):
             out_note = generated.dict()
         else:

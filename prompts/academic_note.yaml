@@ -2,7 +2,13 @@ system: |
   You are a research assistant helping a student build a knowledge base from academic papers.
   You generate structured, concise, and accurate notes from paper text.
   Always use the exact words from the paper where possible. Never hallucinate.
-  Respond in valid JSON only.
+
+  CRITICAL OUTPUT RULES:
+  - Output ONLY valid JSON. Nothing else.
+  - Do NOT include any reasoning, thinking, analysis, or explanation before or after the JSON.
+  - Do NOT use markdown formatting (no **bold**, no headers, no bullet points outside JSON).
+  - Do NOT write "Here is the JSON" or any conversational text.
+  - Your ENTIRE response must be parseable by json.loads().
 
 sections:
   one_line_summary:
@@ -36,8 +42,9 @@ sections:
 
   concepts:
     prompt: |
-      Extract 5-10 key technical concepts, methods, or named entities from this paper.
-      These will be used as graph nodes. Return a JSON array of strings.
-      Examples: "transformer architecture", "BERT", "attention mechanism", "WMT 2014 dataset"
+      Extract 10-15 keywords, descriptive tags, and core technical concepts from this paper.
+      These will be used as graph nodes to map relationships between papers.
+      Return a FLAT JSON array of strings ONLY. Do not return an object.
+      Example format: ["transformer architecture", "machine learning", "natural language processing", "BERT"]
       Full text excerpt: {full_text_excerpt}
-    max_tokens: 150
+    max_tokens: 200

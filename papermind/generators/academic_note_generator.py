@@ -44,74 +44,20 @@ class AcademicNoteGenerator:
         return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
 
     @staticmethod
-    def _canonical_concept_id(value: str) -> Optional[str]:
-        raw = (value or "").strip().lower()
-        if not raw:
-            return None
-        key = re.sub(r"[^a-z0-9\s]+", " ", raw)
-        key = re.sub(r"\s+", " ", key).strip()
-        if len(key) < 3:
-            return None
-        noisy_terms = {
-            "paper", "study", "result", "results", "method", "methods", "model",
-            "conclusion", "introduction", "discussion", "abstract", "analysis",
-            "data", "figure", "table", "section", "reference", "references",
-            "https", "http", "www",
-        }
-        geo_terms = {
-            "usa", "u s a", "u s", "us", "united states", "united kingdom",
-            "england", "scotland", "wales", "ireland", "denmark", "sweden",
-            "norway", "finland", "germany", "france", "italy", "spain",
-            "portugal", "netherlands", "belgium", "switzerland", "austria",
-            "poland", "ukraine", "russia", "china", "japan", "korea", "india",
-            "canada", "mexico", "brazil", "argentina", "australia", "new zealand",
-            "africa", "asia", "europe", "north america", "south america",
-            "american", "british", "danish", "swedish", "norwegian", "finnish",
-            "german", "french", "italian", "spanish", "portuguese", "dutch",
-            "belgian", "austrian", "polish", "russian", "chinese", "japanese",
-            "korean", "indian", "canadian", "mexican", "brazilian", "argentinian",
-            "australian", "colorado", "boulder",
-        }
-        if key in noisy_terms:
-            return None
-        if key in geo_terms:
-            return None
-        for term in geo_terms:
-            if re.search(rf"\b{re.escape(term)}\b", key):
-                return None
-        if re.search(
-            r"\b(university|universities|college|institute|institution|department|school|faculty|hospital|center|centre|laboratory|lab|ministry)\b",
-            key,
-        ):
-            return None
-        if re.search(r"\b(country|state|city|nation|province|county|capital|region)\b", key):
-            return None
-        if re.search(r"\b(edu|ac uk|gmail|yahoo|outlook)\b", key):
-            return None
-        return f"concept:{key.replace(' ', '_')}"
-
-    @staticmethod
     def _ensure_str_list(value: Any, fallback: Optional[List[str]] = None, max_items: int = 8) -> List[str]:
+        items = []
         if isinstance(value, list):
             items = [str(item).strip() for item in value if str(item).strip()]
+        elif isinstance(value, dict):
+            for v in value.values():
+                if isinstance(v, list):
+                    items.extend([str(item).strip() for item in v if str(item).strip()])
+        elif isinstance(value, str) and value.strip():
+            items = [value.strip()]
+            
+        if items:
             return items[:max_items]
-        if isinstance(value, str) and value.strip():
-            return [value.strip()][:max_items]
         return list(fallback or [])[:max_items]
-
-    @staticmethod
-    def _author_terms(authors: List[str]) -> set[str]:
-        terms: set[str] = set()
-        for author in authors or []:
-            cleaned = re.sub(r"[^a-z0-9\s]+", " ", str(author or "").strip().lower())
-            cleaned = re.sub(r"\s+", " ", cleaned).strip()
-            if not cleaned:
-                continue
-            terms.add(cleaned)
-            for part in cleaned.split():
-                if len(part) >= 4:
-                    terms.add(part)
-        return terms
 
     async def _resolve_notebook_id_for_source(self, source_id: str) -> str:
         try:
@@ -371,6 +317,7 @@ class AcademicNoteGenerator:
                 variables = {"full_text_excerpt": target_content[:4000]}
 
             if not target_content:
+                logger.warning(f"[LLM] No content available for section '{section_name}', using fallback")
                 return self._fallback_output(section_name, "", paper.title or "")
 
         # Provision LLM using open notebook's native mechanism
@@ -381,13 +328,24 @@ class AcademicNoteGenerator:
                 default_type="chat",
                 temperature=0.1,
             )
+            logger.info(f"[LLM] Provisioned model for section '{section_name}': {type(llm).__name__}")
+            # Disable reasoning/thinking for OpenAI o1/o3 models to get clean JSON
+            if hasattr(llm, "model_kwargs"):
+                llm.model_kwargs = {**llm.model_kwargs, "reasoning_effort": "low"}
         except Exception as e:
-            logger.error(f"Failed to provision LLM model for section {section_name}: {e}")
+            logger.error(
+                f"Failed to provision LLM model for section '{section_name}'. "
+                f"This usually means no default chat model is configured or the "
+                f"API key is missing. Error: {e}. "
+                f"Visit /api/papermind/diagnostics/llm for details."
+            )
             return self._fallback_output(section_name, target_content, paper.title or "")
 
         chain = prompt_template | llm | JsonOutputParser()
         try:
+            logger.info(f"[LLM] Invoking chain for section '{section_name}' (content length: {len(target_content)} chars)")
             result = await chain.ainvoke(variables)
+            logger.info(f"[LLM] Section '{section_name}' generated successfully via LLM")
             return result
         except Exception as e:
             logger.warning(f"Failed to generate section {section_name} via chain: {e}")
@@ -396,9 +354,17 @@ class AcademicNoteGenerator:
                 messages = prompt_template.format_messages(**variables)
                 raw_response = await llm.ainvoke(messages)
                 raw_text = self._clean_llm_text(getattr(raw_response, "content", str(raw_response)))
+
+                # Reasoning models (o1, o3, etc.) output thinking before JSON.
+                # Find the LAST JSON structure in the response.
+                # Look for [ ... ] or { ... } that is properly balanced.
+                json_result = self._extract_json_from_text(raw_text)
+                if json_result is not None:
+                    return json_result
+
+                # Try parsing the entire cleaned text as JSON
                 try:
-                    parsed = json.loads(raw_text)
-                    return parsed
+                    return json.loads(raw_text)
                 except Exception:
                     pass
 
@@ -406,7 +372,7 @@ class AcademicNoteGenerator:
                     bullet_lines = [
                         re.sub(r"^[-*\d\.)\s]+", "", line).strip()
                         for line in raw_text.splitlines()
-                        if line.strip()
+                        if line.strip() and not line.strip().startswith("**")
                     ]
                     if bullet_lines:
                         return bullet_lines[:10]
@@ -416,6 +382,71 @@ class AcademicNoteGenerator:
                 logger.warning(f"Retry also failed for section {section_name}: {retry_err}")
 
             return self._fallback_output(section_name, target_content, paper.title or "")
+
+    @staticmethod
+    def _extract_json_from_text(text: str):
+        """Extract the last balanced JSON structure from text.
+
+        Reasoning models (o1, o3, DeepSeek-R1, etc.) output thinking
+        before the actual JSON response.  This scans for the last
+        ``[`` or ``{`` that starts a balanced JSON value and returns it.
+        """
+        if not text:
+            return None
+
+        # Collect candidate start positions for [ and {
+        # Process from the END so we find the last JSON block (after reasoning).
+        candidates: list[tuple[int, str]] = []
+        for i in range(len(text) - 1, -1, -1):
+            ch = text[i]
+            if ch in ("[", "{"):
+                candidates.append((i, ch))
+                if len(candidates) >= 20:
+                    break  # safety limit
+
+        for start_pos, bracket in reversed(candidates):
+            substr = text[start_pos:].strip()
+            try:
+                result = json.loads(substr)
+                if isinstance(result, (dict, list)):
+                    return result
+            except json.JSONDecodeError:
+                # Try to find the balanced closing bracket manually
+                depth = 0
+                in_string = False
+                escape_next = False
+                end = -1
+                open_ch = bracket
+                close_ch = "]" if open_ch == "[" else "}"
+                for j in range(start_pos, len(text)):
+                    c = text[j]
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    if c == "\\":
+                        escape_next = True
+                        continue
+                    if c == '"':
+                        in_string = not in_string
+                        continue
+                    if in_string:
+                        continue
+                    if c == open_ch:
+                        depth += 1
+                    elif c == close_ch:
+                        depth -= 1
+                        if depth == 0:
+                            end = j + 1
+                            break
+                if end > start_pos:
+                    try:
+                        result = json.loads(text[start_pos:end])
+                        if isinstance(result, (dict, list)):
+                            return result
+                    except json.JSONDecodeError:
+                        continue
+
+        return None
 
     async def _source_full_text(self, paper: AcademicPaper) -> str:
         try:
@@ -430,7 +461,7 @@ class AcademicNoteGenerator:
         except Exception:
             return ""
 
-    async def generate_note(self, paper: AcademicPaper) -> GeneratedNote:
+    async def generate_note(self, paper: AcademicPaper, raw_text: str = "") -> GeneratedNote:
         """
         Process:
         1. Load prompts from YAML (already done in init)
@@ -443,11 +474,24 @@ class AcademicNoteGenerator:
         """
         # Run generations in parallel or sequentially. We will do sequentially to respect rate limits if any
         supplemental_text = self._paper_fallback_text(paper, limit=4000)
-        source_full_text = await self._source_full_text(paper)
-        if source_full_text:
-            supplemental_text = (supplemental_text + "\n\n" + source_full_text[:12000]).strip()
-        elif not supplemental_text:
-            supplemental_text = source_full_text
+
+        # Prefer raw_text passed directly from the parser (most reliable source)
+        if raw_text and raw_text.strip():
+            supplemental_text = (supplemental_text + "\n\n" + raw_text[:12000]).strip() if supplemental_text else raw_text[:12000]
+        else:
+            source_full_text = await self._source_full_text(paper)
+            if source_full_text:
+                supplemental_text = (supplemental_text + "\n\n" + source_full_text[:12000]).strip()
+            elif not supplemental_text:
+                supplemental_text = source_full_text
+
+        if not supplemental_text:
+            logger.error(
+                f"No content available for note generation. "
+                f"paper.abstract={bool(paper.abstract)}, "
+                f"paper.sections={list(paper.sections.keys()) if paper.sections else 'empty'}, "
+                f"raw_text={len(raw_text) if raw_text else 0} chars"
+            )
 
         one_line_summary = await self._call_llm_for_section(
             "one_line_summary", paper, self.sections["one_line_summary"], supplemental_text
@@ -475,7 +519,7 @@ class AcademicNoteGenerator:
             limitations,
             fallback=["Limitations not explicitly stated in source text."],
         )
-        concepts = self._ensure_str_list(concepts, fallback=[])
+        concepts = self._ensure_str_list(concepts, fallback=[], max_items=15)
 
         methodology = str(methodology or "").strip()
         if self._is_placeholder_text(methodology):
@@ -531,45 +575,13 @@ class AcademicNoteGenerator:
                 },
             )
 
-        # 7. Create/link concept records (normalized and deduplicated)
-        concept_map: Dict[str, str] = {}
-        author_terms = self._author_terms(list(paper.authors or []))
-        for concept_label in concepts:
-            cleaned = str(concept_label or "").strip()
-            normalized = re.sub(r"[^a-z0-9\s]+", " ", cleaned.lower())
-            normalized = re.sub(r"\s+", " ", normalized).strip()
-            if normalized in author_terms:
-                continue
-            concept_id = self._canonical_concept_id(cleaned)
-            if not concept_id:
-                continue
-            if concept_id not in concept_map:
-                concept_map[concept_id] = cleaned
-
-        for concept_id, concept_label in concept_map.items():
-            try:
-                await repo_query(
-                    "UPDATE $id SET label = $label, created_at = time::now()", 
-                    {"id": ensure_record_id(concept_id), "label": concept_label.strip()}
-                )
-                if paper.id:
-                    await repo_query(
-                        "RELATE $in -> tagged_with -> $out",
-                        {
-                            "in": ensure_record_id(str(paper.id)),
-                            "out": ensure_record_id(concept_id),
-                        }
-                    )
-            except Exception as e:
-                logger.warning(f"Failed linking concept {concept_label}: {e}")
-
-        # Return generated note object
+        # 7. Return generated note (concept persistence handled by save_concepts in ingest)
         generated = GeneratedNote(
             one_line_summary=str(one_line_summary),
             key_findings=list(key_findings),
             methodology=str(methodology),
             limitations=list(limitations),
-            concepts=list(concept_map.values()),
+            concepts=list(concepts),
             note_id=note_id
         )
         return generated

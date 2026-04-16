@@ -51,11 +51,11 @@ async def build_similarity_edges(paper_id: str, threshold: float = 0.75):
                 logger.info(f"Creating edge {atom.id} -> {target_id} score {score}")
                 await repo_query(
                     "RELATE $atom_id -> similar_to -> $target_id SET similarity_score = $score;",
-                    {"atom_id": atom.id, "target_id": target_id, "score": score},
+                    {"atom_id": ensure_record_id(atom.id), "target_id": ensure_record_id(target_id), "score": score},
                 )
                 await repo_query(
                     "RELATE $target_id -> similar_to -> $atom_id SET similarity_score = $score;",
-                    {"target_id": target_id, "atom_id": atom.id, "score": score},
+                    {"target_id": ensure_record_id(target_id), "atom_id": ensure_record_id(atom.id), "score": score},
                 )
                 edge_count += 2
     except Exception as e:

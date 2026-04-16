@@ -19,7 +19,7 @@ from papermind.graph.citation_linker import CitationLinker
 from papermind.graph.graph_builder import build_similarity_edges
 from papermind.models import AcademicPaper, Atom
 from papermind.parsers.academic_pdf_parser import AcademicPDFParser, ParsedPaper
-from papermind.tagging.auto_tagger import AutoTagger
+from papermind.tagging.concept_saver import save_concepts
 from papermind.utils import _rows_from_query_result, validate_pdf_path
 
 
@@ -144,7 +144,6 @@ async def _save_atoms_to_db(atoms: list[Atom]) -> list[str]:
     return atom_ids
 
 
-auto_tagger = AutoTagger()
 citation_linker = CitationLinker()
 
 
@@ -264,9 +263,13 @@ async def _run_ingest_pipeline(
             detail=_error_detail(source_id, "graph", str(exc), "graph_error"),
         )
 
+    # 6b. STORE FULL TEXT (needed by note generator's _source_full_text fallback)
+    if parsed.raw_text:
+        await update_source_status(source_id, "processing", full_text=parsed.raw_text)
+
     # 7. NOTE GENERATION
     try:
-        note = await note_generator.generate_note(paper)
+        note = await note_generator.generate_note(paper, raw_text=parsed.raw_text or "")
         logger.info(f"Generated note {note.note_id} for paper {paper_id}")
     except Exception as exc:
         logger.exception(f"Ingest note generation failed for source {source_id}")
@@ -276,11 +279,17 @@ async def _run_ingest_pipeline(
             detail=_error_detail(source_id, "note", str(exc), "note_error"),
         )
 
-    # 8. AUTO-TAG
+    # 8. SAVE CONCEPTS
     try:
-        tags = await auto_tagger.tag_paper(paper_id, parsed, note.concepts)
+        tags = await save_concepts(
+            paper_id=paper_id,
+            note_concepts=note.concepts,
+            paper_keywords=parsed.keywords or [],
+            authors=paper.authors or [],
+        )
+        logger.info(f"Saved {len(tags)} concepts for paper {paper_id}")
     except Exception as exc:
-        logger.exception(f"Ingest auto-tag failed for source {source_id}")
+        logger.exception(f"Ingest concept save failed for source {source_id}")
         await update_source_status(source_id, "tag_error")
         raise HTTPException(
             status_code=500,
@@ -396,3 +405,93 @@ async def upload_and_ingest(
                 os.remove(temp_file_path)
             except OSError as exc:
                 logger.warning(f"Failed to cleanup temp upload file {temp_file_path}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic endpoint – verify model provisioning end-to-end
+# ---------------------------------------------------------------------------
+@ingest_router.get("/diagnostics/llm")
+async def diagnostics_llm():
+    """
+    Runs a minimal LLM provisioning check so you can see exactly where
+    the chain breaks: defaults → model record → credential → API call.
+    """
+    from open_notebook.ai.models import DefaultModels, model_manager
+    from open_notebook.ai.provision import provision_langchain_model
+    from open_notebook.utils import token_count
+
+    diag: dict[str, Any] = {"steps": {}}
+
+    # Step 1 – fetch defaults
+    try:
+        defaults = await DefaultModels.get_instance()
+        diag["steps"]["defaults"] = {
+            "default_chat_model": defaults.default_chat_model,
+            "default_transformation_model": defaults.default_transformation_model,
+            "large_context_model": defaults.large_context_model,
+            "default_embedding_model": defaults.default_embedding_model,
+            "default_tools_model": defaults.default_tools_model,
+        }
+    except Exception as e:
+        diag["steps"]["defaults"] = {"error": str(e)}
+        diag["provision_ok"] = False
+        return diag
+
+    # Step 2 – resolve the model record
+    chat_model_id = defaults.default_chat_model
+    if not chat_model_id:
+        diag["steps"]["model_record"] = {
+            "error": "default_chat_model is NOT set in DefaultModels",
+            "hint": "Go to Settings → Models and select a default chat model.",
+        }
+        diag["provision_ok"] = False
+        return diag
+
+    try:
+        model_record = await model_manager.get_model(chat_model_id)
+        diag["steps"]["model_record"] = {
+            "id": str(getattr(model_record, "id", chat_model_id)),
+            "name": getattr(model_record, "name", None),
+            "provider": getattr(model_record, "provider", None),
+            "type": getattr(model_record, "type", None),
+            "has_credential": bool(getattr(model_record, "credential", None)),
+        }
+    except Exception as e:
+        diag["steps"]["model_record"] = {"error": str(e)}
+        diag["provision_ok"] = False
+        return diag
+
+    # Step 3 – provision a LangChain model (the same call note_generator makes)
+    test_content = "Hello, this is a diagnostic test."
+    try:
+        llm = await provision_langchain_model(
+            test_content,
+            model_id=None,
+            default_type="chat",
+            temperature=0.1,
+        )
+        diag["steps"]["provision"] = {
+            "status": "ok",
+            "llm_type": type(llm).__name__,
+            "tokens_estimated": token_count(test_content),
+        }
+    except Exception as e:
+        diag["steps"]["provision"] = {"error": str(e)}
+        diag["provision_ok"] = False
+        return diag
+
+    # Step 4 – actually call the LLM with a trivial prompt
+    try:
+        from langchain_core.messages import HumanMessage
+
+        response = await llm.ainvoke([HumanMessage(content="Say 'ok' and nothing else.")])
+        diag["steps"]["llm_call"] = {
+            "status": "ok",
+            "response_preview": str(getattr(response, "content", response))[:200],
+        }
+        diag["provision_ok"] = True
+    except Exception as e:
+        diag["steps"]["llm_call"] = {"error": str(e)}
+        diag["provision_ok"] = False
+
+    return diag

@@ -5,9 +5,9 @@ from pydantic import BaseModel
 from urllib.parse import unquote
 from loguru import logger
 import itertools
-import re
 
 from open_notebook.database.repository import repo_query, ensure_record_id
+from papermind.tagging.concept_utils import canonical_concept_id, concept_label_from_id, normalize_concept_key
 from papermind.utils import _rows_from_query_result, safe_error_detail
 
 router = APIRouter(prefix="/papermind", tags=["papermind-graph"])
@@ -85,171 +85,6 @@ def _count_as_int(value: Any) -> int:
     return 0
 
 
-_NOISY_CONCEPT_TERMS = {
-    "journal",
-    "issn",
-    "volume",
-    "issue",
-    "abstract",
-    "introduction",
-    "conclusion",
-    "discussion",
-    "methodology",
-    "methods",
-    "result",
-    "results",
-    "limitation",
-    "limitations",
-    "paper",
-    "study",
-    "http",
-    "https",
-    "site",
-    "sites",
-    "march",
-    "computing",
-    "author",
-    "authors",
-    "doi",
-    "issn",
-    "isbn",
-    "arxiv",
-    "preprint",
-    "publication",
-    "publisher",
-}
-
-_GEO_CONCEPT_TERMS = {
-    "usa",
-    "u s a",
-    "u s",
-    "us",
-    "united states",
-    "united kingdom",
-    "england",
-    "scotland",
-    "wales",
-    "ireland",
-    "denmark",
-    "sweden",
-    "norway",
-    "finland",
-    "germany",
-    "france",
-    "italy",
-    "spain",
-    "portugal",
-    "netherlands",
-    "belgium",
-    "switzerland",
-    "austria",
-    "poland",
-    "ukraine",
-    "russia",
-    "china",
-    "japan",
-    "korea",
-    "india",
-    "canada",
-    "mexico",
-    "brazil",
-    "argentina",
-    "australia",
-    "new zealand",
-    "africa",
-    "asia",
-    "europe",
-    "north america",
-    "south america",
-    "american",
-    "british",
-    "danish",
-    "swedish",
-    "norwegian",
-    "finnish",
-    "german",
-    "french",
-    "italian",
-    "spanish",
-    "portuguese",
-    "dutch",
-    "belgian",
-    "austrian",
-    "polish",
-    "russian",
-    "chinese",
-    "japanese",
-    "korean",
-    "indian",
-    "canadian",
-    "mexican",
-    "brazilian",
-    "argentinian",
-    "australian",
-    "colorado",
-    "boulder",
-}
-
-
-def _canonical_concept_key(value: str) -> str:
-    raw = (value or "").replace("concept:", "").strip().lower()
-    raw = raw.replace("_", " ").replace("-", " ").replace("/", " ")
-    key = re.sub(r"[^a-z0-9\s]+", " ", raw)
-    key = re.sub(r"\s+", " ", key).strip()
-
-    # Normalize common lexical variants that otherwise split concept nodes.
-    key = key.replace("hearing aid", "hearing aid")
-    key = key.replace("auditory peripheral", "auditory periphery")
-    key = key.replace("long term", "longterm")
-
-    if key.endswith("s") and len(key) > 5:
-        key = key[:-1]
-    return key
-
-
-def _is_noisy_concept_key(key: str) -> bool:
-    if not key or len(key) < 3:
-        return True
-    if key in _NOISY_CONCEPT_TERMS:
-        return True
-    if key in _GEO_CONCEPT_TERMS:
-        return True
-    for term in _GEO_CONCEPT_TERMS:
-        if re.search(rf"\b{re.escape(term)}\b", key):
-            return True
-    if re.search(r"\b(issn|isbn|doi|arxiv|journal|volume|issue|author|authors?)\b", key):
-        return True
-    if re.search(
-        r"\b(university|universities|college|institute|institution|department|school|faculty|hospital|center|centre|laboratory|lab|ministry)\b",
-        key,
-    ):
-        return True
-    if re.search(r"\b(country|state|city|nation|province|county|capital|region)\b", key):
-        return True
-    if re.search(r"\b(edu|ac uk|gmail|yahoo|outlook)\b", key):
-        return True
-    if re.search(r"\b10\.\d{4,}/", key):
-        return True
-    # Mostly numeric/metadata-like labels are not useful graph concepts.
-    alnum = re.sub(r"[^a-z0-9]", "", key)
-    if alnum and sum(ch.isdigit() for ch in alnum) / len(alnum) > 0.45:
-        return True
-    return False
-
-
-def _canonical_concept_id(value: str) -> Optional[str]:
-    key = _canonical_concept_key(value)
-    if _is_noisy_concept_key(key):
-        return None
-    return f"concept:{key.replace(' ', '_')}"
-
-
-def _concept_label_from_id(concept_id: str) -> str:
-    key = _canonical_concept_key(concept_id)
-    if not key:
-        return "Concept"
-    return " ".join(part.capitalize() for part in key.split())
-
 @router.get("/graph/{notebook_id}", response_model=GraphResponse)
 async def get_notebook_graph(
     notebook_id: str,
@@ -323,7 +158,7 @@ async def get_notebook_graph(
         author_terms: set[str] = set()
         for p in papers:
             for author in p.get("authors", []) or []:
-                normalized_author = _canonical_concept_key(str(author or ""))
+                normalized_author = normalize_concept_key(str(author or ""))
                 if not normalized_author:
                     continue
                 author_terms.add(normalized_author)
@@ -335,10 +170,10 @@ async def get_notebook_graph(
         for p in papers:
             raw_concepts = _record_id_list(p.get("concepts", []))
             for c in raw_concepts:
-                cid = _canonical_concept_id(c)
+                cid = canonical_concept_id(c)
                 if not cid:
                     continue
-                if _canonical_concept_key(cid) in author_terms:
+                if normalize_concept_key(cid) in author_terms:
                     continue
                 if cid:
                     concept_catalog.add(cid)
@@ -346,11 +181,11 @@ async def get_notebook_graph(
         if concept_filter:
             # If concept filter is applied, only keep papers that have the specified concept
             filtered_papers = []
-            concept_target = _canonical_concept_id(concept_filter)
+            concept_target = canonical_concept_id(concept_filter)
             for p in papers:
                 raw_concepts = _record_id_list(p.get("concepts", []))
                 canonical_concepts = {
-                    cid for cid in (_canonical_concept_id(c) for c in raw_concepts) if cid
+                    cid for cid in (canonical_concept_id(c) for c in raw_concepts) if cid
                 }
                 if concept_target and concept_target in canonical_concepts:
                     filtered_papers.append(p)
@@ -375,10 +210,10 @@ async def get_notebook_graph(
             canonical_concepts: List[str] = []
             seen_concepts: set[str] = set()
             for raw_concept in concepts_list:
-                canonical_id = _canonical_concept_id(raw_concept)
+                canonical_id = canonical_concept_id(raw_concept)
                 if not canonical_id or canonical_id in seen_concepts:
                     continue
-                if _canonical_concept_key(canonical_id) in author_terms:
+                if normalize_concept_key(canonical_id) in author_terms:
                     continue
                 seen_concepts.add(canonical_id)
                 canonical_concepts.append(canonical_id)
@@ -421,7 +256,7 @@ async def get_notebook_graph(
             # Concept Nodes
             if include_concepts and canonical_concepts:
                 for c_id in canonical_concepts:
-                    label = _concept_label_from_id(c_id)
+                    label = concept_label_from_id(c_id)
                     if c_id not in nodes_dict:
                         nodes_dict[c_id] = GraphNode(
                             id=c_id,
@@ -458,12 +293,12 @@ async def get_notebook_graph(
                         continue
 
                     if concept_filter:
-                        concept_target = _canonical_concept_id(concept_filter)
+                        concept_target = canonical_concept_id(concept_filter)
                         if concept_target and concept_target not in overlap:
                             continue
 
                     overlap_labels = [
-                        _concept_label_from_id(cid)
+                        concept_label_from_id(cid)
                         for cid in overlap[:3]
                     ]
                     label = ", ".join(overlap_labels)
