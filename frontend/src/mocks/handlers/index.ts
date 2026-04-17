@@ -8,6 +8,7 @@ import { settingsHandlers } from './settings'
 import { modelHandlers } from './models'
 import { chatHandlers } from './chat'
 import { searchHandlers } from './search'
+import { papermindHandlers } from './papermind'
 
 export const handlers = [
   ...configHandlers,
@@ -19,6 +20,7 @@ export const handlers = [
   ...modelHandlers,
   ...chatHandlers,
   ...searchHandlers,
+  ...papermindHandlers,
 
   // Catch-all for any unhandled endpoints - return success to prevent errors
   http.all('/api/:path*', () => {

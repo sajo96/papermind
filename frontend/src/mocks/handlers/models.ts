@@ -7,15 +7,6 @@ export const modelHandlers = [
     return HttpResponse.json(mockModels)
   }),
 
-  // GET /api/models/:id
-  http.get('/api/models/:id', ({ params }) => {
-    const model = mockModels.find(m => m.id === params.id)
-    if (!model) {
-      return new HttpResponse(null, { status: 404 })
-    }
-    return HttpResponse.json(model)
-  }),
-
   // POST /api/models
   http.post('/api/models', async ({ request }) => {
     const body = await request.json() as any
@@ -29,11 +20,6 @@ export const modelHandlers = [
       updated: new Date().toISOString(),
     }
     return HttpResponse.json(newModel)
-  }),
-
-  // DELETE /api/models/:id
-  http.delete('/api/models/:id', ({ params }) => {
-    return HttpResponse.json({ message: 'Model deleted' })
   }),
 
   // GET /api/models/defaults
@@ -114,6 +100,20 @@ export const modelHandlers = [
       assigned_embedding: 'text-embedding-3-small',
       message: 'Models auto-assigned successfully',
     })
+  }),
+
+  // GET /api/models/:id
+  http.get('/api/models/:id', ({ params }) => {
+    const model = mockModels.find(m => m.id === params.id)
+    if (!model) {
+      return new HttpResponse(null, { status: 404 })
+    }
+    return HttpResponse.json(model)
+  }),
+
+  // DELETE /api/models/:id
+  http.delete('/api/models/:id', () => {
+    return HttpResponse.json({ message: 'Model deleted' })
   }),
 
   // POST /api/models/:id/test
