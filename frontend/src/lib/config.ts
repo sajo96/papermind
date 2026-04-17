@@ -58,6 +58,22 @@ export async function getConfig(): Promise<AppConfig> {
  */
 async function fetchConfig(): Promise<AppConfig> {
   const isDev = process.env.NODE_ENV === 'development'
+  const isMockApi = process.env.NEXT_PUBLIC_MOCK_API === 'true'
+
+  if (isMockApi) {
+    config = {
+      apiUrl: '',
+      version: '0.1.0-mock',
+      buildTime: BUILD_TIME,
+      dbStatus: 'online',
+    }
+
+    if (isDev) {
+      console.log('🔧 [Config] Mock API mode active - using local mock configuration')
+    }
+
+    return config
+  }
 
   if (isDev) {
     console.log('🔧 [Config] Starting configuration detection...')

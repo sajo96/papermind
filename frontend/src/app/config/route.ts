@@ -23,6 +23,13 @@ import { NextRequest, NextResponse } from 'next/server'
  * This allows the same Docker image to work in different deployment scenarios.
  */
 export async function GET(request: NextRequest) {
+  // In mock mode, always use a relative API base so browser requests stay same-origin.
+  if (process.env.NEXT_PUBLIC_MOCK_API === 'true') {
+    return NextResponse.json({
+      apiUrl: '',
+    })
+  }
+
   // Priority 1: Check if API_URL is explicitly set
   const envApiUrl = process.env.API_URL || process.env.NEXT_PUBLIC_API_URL
 
@@ -37,8 +44,8 @@ export async function GET(request: NextRequest) {
     // Get the protocol (http or https)
     // Check X-Forwarded-Proto first (for reverse proxies), then fallback to request scheme
     const proto = request.headers.get('x-forwarded-proto') ||
-                  request.nextUrl.protocol.replace(':', '') ||
-                  'http'
+      request.nextUrl.protocol.replace(':', '') ||
+      'http'
 
     // Get the host header (includes port if non-standard)
     const hostHeader = request.headers.get('host')

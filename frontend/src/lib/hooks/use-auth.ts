@@ -28,6 +28,8 @@ export function useAuth() {
           if (required) {
             checkAuth()
           }
+        }).catch((error) => {
+          console.error('Auth initialization failed:', error)
         })
       } else if (authRequired) {
         // Auth is required, check credentials

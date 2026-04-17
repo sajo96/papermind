@@ -15,15 +15,24 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
   // Use a ref to track checking status to avoid dependency cycles
   const isCheckingRef = useRef(false)
 
+  const isMockApi = process.env.NEXT_PUBLIC_MOCK_API === 'true'
+
   const checkConnection = useCallback(async () => {
+    // Bypass connection check in mock mode
+    if (isMockApi) {
+      setIsChecking(false)
+      setError(null)
+      return
+    }
+
     // Prevent re-entry if already checking
     if (isCheckingRef.current) {
        return
     }
-    
+
     isCheckingRef.current = true
     setIsChecking(true)
-    
+
     setError(null)
 
     // Reset config cache to force a fresh fetch
@@ -68,12 +77,12 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
           attemptedUrl,
         },
       }
-      
+
       setError(apiError)
       isCheckingRef.current = false
       setIsChecking(false)
     }
-  }, []) // Empty dependency array - stable callback
+  }, [isMockApi]) // Include isMockApi in dependency array
 
   // Check connection on mount
   useEffect(() => {

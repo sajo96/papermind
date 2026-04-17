@@ -21,6 +21,12 @@ const nextConfig: NextConfig = {
     // Override for multi-container: INTERNAL_API_URL=http://api-service:5055
     const internalApiUrl = process.env.INTERNAL_API_URL || 'http://localhost:5055'
 
+    // Skip rewrites when running in mock mode
+    if (process.env.NEXT_PUBLIC_MOCK_API === 'true') {
+      console.log('[Next.js Rewrites] MSW mode active - skipping rewrites')
+      return []
+    }
+
     console.log(`[Next.js Rewrites] Proxying /api/* to ${internalApiUrl}/api/*`)
 
     return [
