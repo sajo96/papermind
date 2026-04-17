@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { Loader2 } from "lucide-react";
 import PaperPanel from "./PaperPanel";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { GraphNode, GraphData } from "./types";
 import KnowledgeGraphSigmaCanvas from "./KnowledgeGraphSigmaCanvas";
+import { useSources } from "@/lib/hooks/use-sources";
+import { QUERY_KEYS } from "@/lib/api/query-client";
 export default function KnowledgeGraph({ notebookId }: { notebookId: string }) {
     const [minSim, setMinSim] = useState<number>(0.75);
     const [minSharedConcepts, setMinSharedConcepts] = useState<number>(2);
@@ -14,6 +16,9 @@ export default function KnowledgeGraph({ notebookId }: { notebookId: string }) {
     const [showEdgeLabels, setShowEdgeLabels] = useState<boolean>(false);
     const [edgeMode, setEdgeMode] = useState<"concept_similarity" | "cites" | "similar_to">("concept_similarity");
     const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
+    const [hasLoadedGraphOnce, setHasLoadedGraphOnce] = useState<boolean>(false);
+    const hasSeenActiveSourceRef = useRef<boolean>(false);
+    const queryClient = useQueryClient();
 
     const normalizedNotebookId = useMemo(() => {
         // Route params may already be URL-encoded (e.g. notebook%3Aabc).
@@ -24,6 +29,40 @@ export default function KnowledgeGraph({ notebookId }: { notebookId: string }) {
             return notebookId;
         }
     }, [notebookId]);
+
+    const { data: sources } = useSources(normalizedNotebookId);
+    const hasActiveSource = useMemo(() => {
+        if (!sources) {
+            return false;
+        }
+
+        return sources.some((source) => {
+            if (source.command_id) {
+                return true;
+            }
+
+            return source.status === "new" || source.status === "queued" || source.status === "running" || source.status === "processing";
+        });
+    }, [sources]);
+
+    useEffect(() => {
+        if (hasActiveSource) {
+            hasSeenActiveSourceRef.current = true;
+            return;
+        }
+
+        if (!hasSeenActiveSourceRef.current) {
+            return;
+        }
+
+        hasSeenActiveSourceRef.current = false;
+
+        // A source reached a terminal/ready state, so refresh graph data once.
+        queryClient.invalidateQueries({
+            queryKey: QUERY_KEYS.notebookGraph(normalizedNotebookId),
+            refetchType: "active",
+        });
+    }, [hasActiveSource, normalizedNotebookId, queryClient]);
 
     const fetchGraphData = async (): Promise<GraphData> => {
         let url = `/api/papermind/graph/${encodeURIComponent(normalizedNotebookId)}?min_similarity=${minSim}&max_similarity_edges=800&max_atoms=2500&min_shared_concepts=${minSharedConcepts}`;
@@ -39,11 +78,20 @@ export default function KnowledgeGraph({ notebookId }: { notebookId: string }) {
     };
 
     const { data, isLoading, error } = useQuery<GraphData>({
-        queryKey: ["notebookGraph", normalizedNotebookId, minSim, minSharedConcepts, conceptFilter],
+        queryKey: [...QUERY_KEYS.notebookGraph(normalizedNotebookId), minSim, minSharedConcepts, conceptFilter],
         queryFn: fetchGraphData,
+        enabled: !hasLoadedGraphOnce || !hasActiveSource,
         staleTime: 30 * 1000,
-        refetchOnWindowFocus: true,
+        refetchOnWindowFocus: !hasActiveSource,
     });
+
+    useEffect(() => {
+        if (!data || hasLoadedGraphOnce) {
+            return;
+        }
+
+        setHasLoadedGraphOnce(true);
+    }, [data, hasLoadedGraphOnce]);
 
     const uniqueConcepts = useMemo(() => {
         const metaConcepts = (data?.meta?.concept_options as string[] | undefined) || [];

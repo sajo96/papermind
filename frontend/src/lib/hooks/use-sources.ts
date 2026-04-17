@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from '@tanstack/react-query'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { sourcesApi } from '@/lib/api/sources'
 import { QUERY_KEYS } from '@/lib/api/query-client'
 import { useToast } from '@/lib/hooks/use-toast'
@@ -24,8 +24,53 @@ function isActiveSourceStatus(status?: string | null, hasCommand = false): boole
   return hasCommand || (typeof status === 'string' && ACTIVE_SOURCE_STATUSES.has(status))
 }
 
+function useRefreshDerivedNotebookQueries(
+  notebookId: string | undefined,
+  sources: SourceListResponse[] | undefined
+) {
+  const queryClient = useQueryClient()
+  const previousActiveStateBySourceRef = useRef<Record<string, boolean>>({})
+
+  useEffect(() => {
+    if (!notebookId || !sources) {
+      return
+    }
+
+    const previousBySource = previousActiveStateBySourceRef.current
+    const nextBySource: Record<string, boolean> = {}
+    let shouldRefreshDerivedQueries = false
+
+    for (const source of sources) {
+      const isCurrentlyActive = isActiveSourceStatus(source.status, !!source.command_id)
+      const wasPreviouslyActive = previousBySource[source.id] === true
+
+      nextBySource[source.id] = isCurrentlyActive
+
+      // Refresh only after a source leaves active processing states.
+      if (wasPreviouslyActive && !isCurrentlyActive) {
+        shouldRefreshDerivedQueries = true
+      }
+    }
+
+    previousActiveStateBySourceRef.current = nextBySource
+
+    if (!shouldRefreshDerivedQueries) {
+      return
+    }
+
+    queryClient.invalidateQueries({
+      queryKey: QUERY_KEYS.notes(notebookId),
+      refetchType: 'active',
+    })
+    queryClient.invalidateQueries({
+      queryKey: QUERY_KEYS.notebookGraph(notebookId),
+      refetchType: 'active',
+    })
+  }, [notebookId, queryClient, sources])
+}
+
 export function useSources(notebookId?: string) {
-  return useQuery({
+  const query = useQuery({
     queryKey: QUERY_KEYS.sources(notebookId),
     queryFn: () => sourcesApi.list({ notebook_id: notebookId }),
     enabled: !!notebookId,
@@ -37,6 +82,10 @@ export function useSources(notebookId?: string) {
       return hasActiveSource ? 2000 : false
     },
   })
+
+  useRefreshDerivedNotebookQueries(notebookId, query.data)
+
+  return query
 }
 
 /**
@@ -80,6 +129,8 @@ export function useNotebookSources(notebookId: string) {
     () => query.data?.pages.flatMap(page => page.sources) ?? [],
     [query.data?.pages]
   )
+
+  useRefreshDerivedNotebookQueries(notebookId, sources)
 
   // Refetch function that resets to first page
   const refetch = useCallback(() => {

@@ -120,8 +120,9 @@ async def get_notebook_graph(
             "source_id IN ("
             "SELECT VALUE id FROM source "
             "WHERE id IN (SELECT VALUE in FROM reference WHERE out = $notebook_id) "
-            "AND (status = 'complete' OR status = 'completed' OR status IS NONE)"
-            ")"
+            "AND (status = 'complete' OR status = 'completed')"
+            ")",
+            "pipeline_stage = 'done'"
         ]
         params: Dict[str, Any] = {"notebook_id": nb_record_id}
         if year_from is not None:
