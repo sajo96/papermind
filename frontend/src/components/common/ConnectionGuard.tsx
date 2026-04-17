@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { usePathname } from 'next/navigation'
 import { ConnectionError } from '@/lib/types/config'
 import { ConnectionErrorOverlay } from '@/components/errors/ConnectionErrorOverlay'
 import { getConfig, resetConfig } from '@/lib/config'
@@ -10,6 +11,8 @@ interface ConnectionGuardProps {
 }
 
 export function ConnectionGuard({ children }: ConnectionGuardProps) {
+  const pathname = usePathname()
+  const shouldBypassConnectionCheck = pathname?.startsWith('/builder-preview')
   const [error, setError] = useState<ConnectionError | null>(null)
   const [isChecking, setIsChecking] = useState(true)
   // Use a ref to track checking status to avoid dependency cycles
@@ -18,12 +21,12 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
   const checkConnection = useCallback(async () => {
     // Prevent re-entry if already checking
     if (isCheckingRef.current) {
-       return
+      return
     }
-    
+
     isCheckingRef.current = true
     setIsChecking(true)
-    
+
     setError(null)
 
     // Reset config cache to force a fresh fetch
@@ -68,7 +71,7 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
           attemptedUrl,
         },
       }
-      
+
       setError(apiError)
       isCheckingRef.current = false
       setIsChecking(false)
@@ -77,11 +80,22 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
 
   // Check connection on mount
   useEffect(() => {
+    if (shouldBypassConnectionCheck) {
+      setError(null)
+      setIsChecking(false)
+      isCheckingRef.current = false
+      return
+    }
+
     checkConnection()
-  }, [checkConnection])
+  }, [checkConnection, shouldBypassConnectionCheck])
 
   // Add keyboard shortcut for retry (R key)
   useEffect(() => {
+    if (shouldBypassConnectionCheck) {
+      return
+    }
+
     const handleKeyPress = (e: KeyboardEvent) => {
       if (error && (e.key === 'r' || e.key === 'R')) {
         e.preventDefault()
@@ -91,7 +105,12 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
 
     window.addEventListener('keydown', handleKeyPress)
     return () => window.removeEventListener('keydown', handleKeyPress)
-  }, [error, checkConnection])
+  }, [error, checkConnection, shouldBypassConnectionCheck])
+
+  // Allow visual editing routes to load even if the API is unavailable.
+  if (shouldBypassConnectionCheck) {
+    return <>{children}</>
+  }
 
   // Show overlay if there's an error
   if (error) {
