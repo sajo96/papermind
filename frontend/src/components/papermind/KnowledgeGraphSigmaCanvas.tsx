@@ -37,6 +37,20 @@ function normalizeWeight(raw: number, min: number, max: number): number {
     return Math.max(0, Math.min(1, (raw - min) / range));
 }
 
+type EndpointRef = string | { id?: string } | null | undefined;
+
+function endpointId(endpoint: EndpointRef): string {
+    if (typeof endpoint === "string") return endpoint;
+    if (endpoint && typeof endpoint === "object" && typeof endpoint.id === "string") {
+        return endpoint.id;
+    }
+    return "";
+}
+
+function asString(value: unknown): string | undefined {
+    return typeof value === "string" ? value : undefined;
+}
+
 export default function KnowledgeGraphSigmaCanvas({ graphData, onPaperClick }: Props) {
     const containerRef = useRef<HTMLDivElement | null>(null);
     const rendererRef = useRef<Sigma | null>(null);
@@ -60,8 +74,8 @@ export default function KnowledgeGraphSigmaCanvas({ graphData, onPaperClick }: P
         let maxRawEdgeWeight = Number.NEGATIVE_INFINITY;
 
         for (const e of graphData.links) {
-            const sourceId = typeof e.source === "string" ? e.source : String((e.source as any)?.id || "");
-            const targetId = typeof e.target === "string" ? e.target : String((e.target as any)?.id || "");
+            const sourceId = endpointId(e.source as EndpointRef);
+            const targetId = endpointId(e.target as EndpointRef);
             if (!sourceId || !targetId) continue;
             edgeDegree.set(sourceId, (edgeDegree.get(sourceId) || 0) + 1);
             edgeDegree.set(targetId, (edgeDegree.get(targetId) || 0) + 1);
@@ -97,8 +111,8 @@ export default function KnowledgeGraphSigmaCanvas({ graphData, onPaperClick }: P
         }
 
         graphData.links.forEach((edge, idx) => {
-            const sourceId = typeof edge.source === "string" ? edge.source : String((edge.source as any)?.id || "");
-            const targetId = typeof edge.target === "string" ? edge.target : String((edge.target as any)?.id || "");
+            const sourceId = endpointId(edge.source as EndpointRef);
+            const targetId = endpointId(edge.target as EndpointRef);
             if (!sourceId || !targetId) return;
             if (!graph.hasNode(sourceId) || !graph.hasNode(targetId)) return;
 
@@ -142,10 +156,13 @@ export default function KnowledgeGraphSigmaCanvas({ graphData, onPaperClick }: P
             defaultNodeType: "circle",
             defaultEdgeType: "line",
             defaultDrawNodeHover: (ctx, data, settings) => {
-                const label = String((data as any).fullLabel || data.label || "");
+                const label =
+                    asString((data as { fullLabel?: unknown }).fullLabel) ||
+                    asString(data.label) ||
+                    "";
                 if (!label) return;
                 const fontSize = 12;
-                const font = `${settings.labelFont || "sans-serif"}`;
+                const font = asString((settings as { labelFont?: unknown }).labelFont) || "sans-serif";
                 ctx.font = `${fontSize}px ${font}`;
                 const textWidth = ctx.measureText(label).width;
                 const padding = 6;
@@ -164,15 +181,18 @@ export default function KnowledgeGraphSigmaCanvas({ graphData, onPaperClick }: P
 
         const applyThemeToGraph = () => {
             const t = themeRef.current;
-            graph.forEachNode((id, attrs: any) => {
+            graph.forEachNode((id, attrs) => {
+                const connectivity = typeof attrs.connectivity === "number" ? attrs.connectivity : 0;
+                const groupIndex = typeof attrs.groupIndex === "number" ? attrs.groupIndex : 0;
                 graph.setNodeAttribute(
                     id,
                     "color",
-                    nodeColor(t, Number(attrs.connectivity || 0), Number(attrs.groupIndex || 0))
+                    nodeColor(t, connectivity, groupIndex)
                 );
             });
-            graph.forEachEdge((id, attrs: any) => {
-                graph.setEdgeAttribute(id, "color", edgeColor(t, Number(attrs.weightNorm || 0.5)));
+            graph.forEachEdge((id, attrs) => {
+                const weightNorm = typeof attrs.weightNorm === "number" ? attrs.weightNorm : 0.5;
+                graph.setEdgeAttribute(id, "color", edgeColor(t, weightNorm));
             });
         };
         applyThemeToGraph();

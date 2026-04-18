@@ -8,6 +8,14 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { GraphNode } from "./types";
 
+type NormalizedAiNote = {
+    one_line_summary?: string;
+    key_findings?: string[];
+    methodology: string;
+    limitations: string[];
+    [key: string]: unknown;
+};
+
 export default function PaperPanel({
     notebookId,
     paperNode,
@@ -30,11 +38,19 @@ export default function PaperPanel({
         );
     };
 
-    const normalizeNotePayload = (payload: any) => {
-        const note = payload?.note ? payload.note : payload;
-        const methodology = !isPlaceholderText(note?.methodology) ? String(note?.methodology || "").trim() : "";
+    const normalizeNotePayload = (payload: unknown): NormalizedAiNote => {
+        const payloadObj = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+        const nestedNote = payloadObj.note;
+        const note = nestedNote && typeof nestedNote === "object"
+            ? (nestedNote as Record<string, unknown>)
+            : payloadObj;
 
-        const limitationsRaw = Array.isArray(note?.limitations) ? note.limitations : [];
+        const methodologyRaw = note.methodology;
+        const methodology = !isPlaceholderText(methodologyRaw as string | undefined)
+            ? String(methodologyRaw || "").trim()
+            : "";
+
+        const limitationsRaw = Array.isArray(note.limitations) ? note.limitations : [];
         const limitations = limitationsRaw
             .map((item: unknown) => String(item || "").trim())
             .filter((item: string) => !isPlaceholderText(item));
@@ -163,7 +179,7 @@ export default function PaperPanel({
                         ) : aiNote ? (
                             <div className="flex flex-col gap-6 text-sm">
                                 <div className="bg-muted/40 p-4 rounded-xl text-primary/90 font-medium italic border leading-relaxed">
-                                    "{aiNote.one_line_summary}"
+                                    &ldquo;{aiNote.one_line_summary}&rdquo;
                                 </div>
 
                                 <div>

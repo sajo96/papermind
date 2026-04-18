@@ -1,7 +1,7 @@
 import { http, HttpResponse } from 'msw'
 import { mockNotebooks } from '../data/notebooks'
 
-let notebooks = [...mockNotebooks]
+const notebooks = [...mockNotebooks]
 
 export const notebookHandlers = [
   // GET /api/notebooks
@@ -82,14 +82,14 @@ export const notebookHandlers = [
   }),
 
   // POST /api/notebooks/:notebookId/sources/:sourceId
-  http.post('/api/notebooks/:notebookId/sources/:sourceId', ({ params }) => {
+  http.post('/api/notebooks/:notebookId/sources/:sourceId', () => {
     return HttpResponse.json({
       message: 'Source added to notebook',
     })
   }),
 
   // DELETE /api/notebooks/:notebookId/sources/:sourceId
-  http.delete('/api/notebooks/:notebookId/sources/:sourceId', ({ params }) => {
+  http.delete('/api/notebooks/:notebookId/sources/:sourceId', () => {
     return HttpResponse.json({
       message: 'Source removed from notebook',
     })

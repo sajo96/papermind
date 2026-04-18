@@ -1,6 +1,13 @@
 import { http, HttpResponse } from 'msw'
 import { mockModels } from '../data/models'
 
+type CreateModelBody = {
+  name: string
+  provider: string
+  type: string
+  credential?: string | null
+}
+
 export const modelHandlers = [
   // GET /api/models
   http.get('/api/models', () => {
@@ -9,7 +16,7 @@ export const modelHandlers = [
 
   // POST /api/models
   http.post('/api/models', async ({ request }) => {
-    const body = await request.json() as any
+    const body = await request.json() as CreateModelBody
     const newModel = {
       id: `model-${Date.now()}`,
       name: body.name,

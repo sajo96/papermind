@@ -15,7 +15,7 @@ type NoteUpsertBody = {
   notebook_id?: string | null
 }
 
-let notes: MockNote[] = [...(mockNotes as MockNote[])]
+const notes: MockNote[] = [...(mockNotes as MockNote[])]
 
 export const noteHandlers = [
   // GET /api/notes
