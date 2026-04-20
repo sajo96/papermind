@@ -12,6 +12,7 @@ import { getDateLocale } from '@/lib/utils/date-locale'
 import { InlineEdit } from '@/components/common/InlineEdit'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import Link from 'next/link'
+import { useRouter } from "next/navigation";
 
 interface NotebookHeaderProps {
   notebook: NotebookResponse
@@ -21,6 +22,7 @@ export function NotebookHeader({ notebook }: NotebookHeaderProps) {
   const { t, language } = useTranslation()
   const dfLocale = getDateLocale(language)
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const router = useRouter();
 
   const updateNotebook = useUpdateNotebook()
 
@@ -54,6 +56,19 @@ export function NotebookHeader({ notebook }: NotebookHeaderProps) {
       <div className="border-b pb-6">
         <div className="space-y-2">
           <div className="flex items-center justify-between">
+            <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className=" flex text-primary w-8 mr-4 hover:bg-accent transition-colors"
+                  onClick={() => router.push('/notebooks')}
+                  type="button"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+                  </svg>
+                </Button>
+            </div>
             <div className="flex items-center gap-3 flex-1">
               <InlineEdit
                 id="notebook-name"
@@ -86,12 +101,12 @@ export function NotebookHeader({ notebook }: NotebookHeaderProps) {
               >
                 {notebook.archived ? (
                   <>
-                    <ArchiveRestore className="h-4 w-4 mr-2" />
+                    <ArchiveRestore className="h-4 w-4 mr-2 text-green-500" />
                     {t.notebooks.unarchive}
                   </>
                 ) : (
                   <>
-                    <Archive className="h-4 w-4 mr-2" />
+                    <Archive className="h-4 w-4 mr-2 text-orange-500" />
                     {t.notebooks.archive}
                   </>
                 )}
@@ -100,7 +115,7 @@ export function NotebookHeader({ notebook }: NotebookHeaderProps) {
                 variant="outline"
                 size="sm"
                 onClick={() => setShowDeleteDialog(true)}
-                className="text-red-600 hover:text-red-700"
+                className="text-red-600 hover:text-white"
               >
                 <Trash2 className="h-4 w-4 mr-2" />
                 {t.common.delete}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useMemo, useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import PaperPanel from "./PaperPanel";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -9,6 +10,7 @@ import KnowledgeGraphSigmaCanvas from "./KnowledgeGraphSigmaCanvas";
 import { useSources } from "@/lib/hooks/use-sources";
 import { QUERY_KEYS } from "@/lib/api/query-client";
 export default function KnowledgeGraph({ notebookId }: { notebookId: string }) {
+    const router = useRouter();
     const [minSim, setMinSim] = useState<number>(0.75);
     const [minSharedConcepts, setMinSharedConcepts] = useState<number>(2);
     const [conceptFilter, setConceptFilter] = useState<string>("");
@@ -119,8 +121,19 @@ export default function KnowledgeGraph({ notebookId }: { notebookId: string }) {
 
     return (
         <div className="relative w-full h-full flex overflow-hidden bg-zinc-50 dark:bg-[#1C1C1E]">
+            {/* Back Button */}
+            <button
+                className="absolute top-4 left-4 z-30 flex items-center gap-2 px-3 py-1.5 rounded-md bg-background/80 border shadow-sm text-sm font-medium hover:bg-accent transition-colors"
+                onClick={() => router.back()}
+                type="button"
+            >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+                </svg>
+                Back
+            </button>
             {/* Settings / Controls Overlay */}
-            <div className="absolute top-4 left-4 z-20 bg-background/80 backdrop-blur-md border rounded-xl p-4 shadow-sm w-72 flex flex-col gap-4">
+            <div className="absolute top-14 left-4 z-20 bg-background/80 backdrop-blur-md border rounded-xl p-4 shadow-sm w-72 flex flex-col gap-4">
                 <h3 className="font-semibold text-sm text-foreground/90 uppercase tracking-widest flex items-center gap-2">
                     Knowledge Map Controls
                 </h3>
