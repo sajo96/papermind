@@ -1,14 +1,18 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
 import { sourcesApi } from '@/lib/api/sources'
-import { SourceListResponse } from '@/lib/types/api'
+import { notebooksApi } from '@/lib/api/notebooks'
+import { SourceListResponse, NotebookResponse } from '@/lib/types/api'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { EmptyState } from '@/components/common/EmptyState'
 import { AppShell } from '@/components/layout/AppShell'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
-import { FileText, Link as LinkIcon, Upload, AlignLeft, Trash2, ArrowUpDown } from 'lucide-react'
+import {
+  FileText, Link as LinkIcon, Upload, AlignLeft, Trash2,
+  ArrowUpDown, Folder, FolderOpen, ChevronRight, ChevronDown
+} from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -18,113 +22,180 @@ import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 import { getApiErrorKey } from '@/lib/utils/error-handler'
 
+interface NotebookGroup {
+  notebook: NotebookResponse
+  sources: SourceListResponse[]
+  loading: boolean
+  loaded: boolean
+}
+
+const PAGE_SIZE = 30
+
 export default function SourcesPage() {
   const { t, language } = useTranslation()
-  const [sources, setSources] = useState<SourceListResponse[]>([])
+  const [notebookGroups, setNotebookGroups] = useState<NotebookGroup[]>([])
   const [loading, setLoading] = useState(true)
-  const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [sortBy, setSortBy] = useState<'created' | 'updated'>('updated')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
   const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; source: SourceListResponse | null }>({
     open: false,
-    source: null
+    source: null,
   })
+
   const router = useRouter()
   const tableRef = useRef<HTMLTableElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const offsetRef = useRef(0)
-  const loadingMoreRef = useRef(false)
-  const hasMoreRef = useRef(true)
-  const PAGE_SIZE = 30
 
-  const fetchSources = useCallback(async (reset = false) => {
+  // ---------- Fetch notebooks, then lazy-load sources per folder ----------
+
+  const fetchNotebooks = useCallback(async () => {
     try {
-      // Check flags before proceeding
-      if (!reset && (loadingMoreRef.current || !hasMoreRef.current)) {
-        return
+      setLoading(true)
+      const notebooks: NotebookResponse[] = await notebooksApi.list({ archived: false })
+      setNotebookGroups(
+        notebooks.map((nb) => ({ notebook: nb, sources: [], loading: false, loaded: false }))
+      )
+      // Auto-expand first notebook
+      if (notebooks.length > 0) {
+        setExpandedFolders(new Set([notebooks[0].id]))
+        fetchSourcesForNotebook(notebooks[0].id)
       }
-
-      if (reset) {
-        setLoading(true)
-        offsetRef.current = 0
-        setSources([])
-        hasMoreRef.current = true
-      } else {
-        loadingMoreRef.current = true
-        setLoadingMore(true)
-      }
-
-      const data = await sourcesApi.list({
-        limit: PAGE_SIZE,
-        offset: offsetRef.current,
-        sort_by: sortBy,
-        sort_order: sortOrder,
-      })
-
-      if (reset) {
-        setSources(data)
-      } else {
-        setSources(prev => [...prev, ...data])
-      }
-
-      // Check if we have more data
-      const hasMoreData = data.length === PAGE_SIZE
-      hasMoreRef.current = hasMoreData
-      offsetRef.current += data.length
     } catch (err) {
-      console.error('Failed to fetch sources:', err)
+      console.error('Failed to fetch notebooks:', err)
       setError(t.sources.failedToLoad)
       toast.error(t.sources.failedToLoad)
     } finally {
       setLoading(false)
-      setLoadingMore(false)
-      loadingMoreRef.current = false
+    }
+  }, [t.sources.failedToLoad])
+
+  const fetchSourcesForNotebook = useCallback(async (notebookId: string) => {
+    setNotebookGroups((prev) =>
+      prev.map((g) =>
+        g.notebook.id === notebookId ? { ...g, loading: true } : g
+      )
+    )
+    try {
+      const data: SourceListResponse[] = await sourcesApi.list({
+        notebook_id: notebookId,
+        limit: PAGE_SIZE,
+        offset: 0,
+        sort_by: sortBy,
+        sort_order: sortOrder,
+      })
+      setNotebookGroups((prev) =>
+        prev.map((g) =>
+          g.notebook.id === notebookId
+            ? { ...g, sources: data, loading: false, loaded: true }
+            : g
+        )
+      )
+    } catch (err) {
+      console.error(`Failed to fetch sources for notebook ${notebookId}:`, err)
+      toast.error(t.sources.failedToLoad)
+      setNotebookGroups((prev) =>
+        prev.map((g) =>
+          g.notebook.id === notebookId ? { ...g, loading: false } : g
+        )
+      )
     }
   }, [sortBy, sortOrder, t.sources.failedToLoad])
 
-  // Initial load and when sort changes
   useEffect(() => {
-    fetchSources(true)
+    fetchNotebooks()
+  }, [fetchNotebooks])
+
+  // Re-fetch sources when sort changes, but only for already-loaded folders
+  useEffect(() => {
+    notebookGroups.forEach((g) => {
+      if (g.loaded) fetchSourcesForNotebook(g.notebook.id)
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortBy, sortOrder])
 
-  useEffect(() => {
-    // Focus the table when component mounts or sources change
-    if (sources.length > 0 && tableRef.current) {
-      tableRef.current.focus()
+  // ---------- Folder toggle ----------
+
+  const toggleFolder = useCallback((notebookId: string) => {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev)
+      if (next.has(notebookId)) {
+        next.delete(notebookId)
+      } else {
+        next.add(notebookId)
+        // Lazy-load sources the first time a folder is opened
+        const group = notebookGroups.find((g) => g.notebook.id === notebookId)
+        if (group && !group.loaded && !group.loading) {
+          fetchSourcesForNotebook(notebookId)
+        }
+      }
+      return next
+    })
+  }, [notebookGroups, fetchSourcesForNotebook])
+
+  // ---------- Flattened visible items for keyboard nav ----------
+
+  const visibleItems = useMemo(() => {
+    const items: Array<
+      | { type: 'folder'; notebookId: string }
+      | { type: 'file'; source: SourceListResponse; notebookId: string }
+    > = []
+    notebookGroups.forEach((g) => {
+      items.push({ type: 'folder', notebookId: g.notebook.id })
+      if (expandedFolders.has(g.notebook.id)) {
+        g.sources.forEach((source) =>
+          items.push({ type: 'file', source, notebookId: g.notebook.id })
+        )
+      }
+    })
+    return items
+  }, [notebookGroups, expandedFolders])
+
+  // ---------- Keyboard navigation ----------
+
+  const scrollToSelectedRow = useCallback((index: number) => {
+    const scrollContainer = scrollContainerRef.current
+    if (!scrollContainer) return
+    const rows = scrollContainer.querySelectorAll('tbody tr')
+    const selectedRow = rows[index] as HTMLElement
+    if (!selectedRow) return
+    const containerRect = scrollContainer.getBoundingClientRect()
+    const rowRect = selectedRow.getBoundingClientRect()
+    if (rowRect.top < containerRect.top) {
+      selectedRow.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    } else if (rowRect.bottom > containerRect.bottom) {
+      selectedRow.scrollIntoView({ behavior: 'smooth', block: 'end' })
     }
-  }, [sources])
+  }, [])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (sources.length === 0) return
-
+      if (visibleItems.length === 0) return
       switch (e.key) {
         case 'ArrowDown':
           e.preventDefault()
           setSelectedIndex((prev) => {
-            const newIndex = Math.min(prev + 1, sources.length - 1)
-            // Scroll to keep selected row visible
-            setTimeout(() => scrollToSelectedRow(newIndex), 0)
-            return newIndex
+            const next = Math.min(prev + 1, visibleItems.length - 1)
+            setTimeout(() => scrollToSelectedRow(next), 0)
+            return next
           })
           break
         case 'ArrowUp':
           e.preventDefault()
           setSelectedIndex((prev) => {
-            const newIndex = Math.max(prev - 1, 0)
-            // Scroll to keep selected row visible
-            setTimeout(() => scrollToSelectedRow(newIndex), 0)
-            return newIndex
+            const next = Math.max(prev - 1, 0)
+            setTimeout(() => scrollToSelectedRow(next), 0)
+            return next
           })
           break
         case 'Enter':
           e.preventDefault()
-          if (sources[selectedIndex]) {
-            router.push(`/sources/${sources[selectedIndex].id}`)
-          }
+          const item = visibleItems[selectedIndex]
+          if (!item) return
+          if (item.type === 'folder') toggleFolder(item.notebookId)
+          else router.push(`/sources/${item.source.id}`)
           break
         case 'Home':
           e.preventDefault()
@@ -133,81 +204,26 @@ export default function SourcesPage() {
           break
         case 'End':
           e.preventDefault()
-          const lastIndex = sources.length - 1
-          setSelectedIndex(lastIndex)
-          setTimeout(() => scrollToSelectedRow(lastIndex), 0)
+          const last = visibleItems.length - 1
+          setSelectedIndex(last)
+          setTimeout(() => scrollToSelectedRow(last), 0)
           break
       }
     }
-
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [sources, selectedIndex, router])
+  }, [visibleItems, selectedIndex, router, toggleFolder, scrollToSelectedRow])
 
-  const scrollToSelectedRow = (index: number) => {
-    const scrollContainer = scrollContainerRef.current
-    if (!scrollContainer) return
-
-    // Find the selected row element
-    const rows = scrollContainer.querySelectorAll('tbody tr')
-    const selectedRow = rows[index] as HTMLElement
-    if (!selectedRow) return
-
-    const containerRect = scrollContainer.getBoundingClientRect()
-    const rowRect = selectedRow.getBoundingClientRect()
-
-    // Check if row is above visible area
-    if (rowRect.top < containerRect.top) {
-      selectedRow.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
-    // Check if row is below visible area
-    else if (rowRect.bottom > containerRect.bottom) {
-      selectedRow.scrollIntoView({ behavior: 'smooth', block: 'end' })
-    }
-  }
-
-  // Set up scroll listener after sources are loaded
   useEffect(() => {
-    const scrollContainer = scrollContainerRef.current
-    if (!scrollContainer) return
+    if (visibleItems.length > 0 && tableRef.current) tableRef.current.focus()
+  }, [visibleItems])
 
-    let scrollTimeout: NodeJS.Timeout | null = null
-
-    const handleScroll = () => {
-      if (scrollTimeout) {
-        clearTimeout(scrollTimeout)
-      }
-
-      scrollTimeout = setTimeout(() => {
-        if (!scrollContainerRef.current) return
-
-        const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current
-        const distanceFromBottom = scrollHeight - scrollTop - clientHeight
-
-        // Load more when within 200px of the bottom
-        if (distanceFromBottom < 200 && !loadingMoreRef.current && hasMoreRef.current) {
-          fetchSources(false)
-        }
-      }, 100)
-    }
-
-    scrollContainer.addEventListener('scroll', handleScroll)
-    handleScroll() // Check on mount
-
-    return () => {
-      scrollContainer.removeEventListener('scroll', handleScroll)
-      if (scrollTimeout) {
-        clearTimeout(scrollTimeout)
-      }
-    }
-  }, [fetchSources, sources.length])
+  // ---------- Helpers ----------
 
   const toggleSort = (field: 'created' | 'updated') => {
     if (sortBy === field) {
-      // Toggle order if clicking the same field
-      setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc')
+      setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
     } else {
-      // Switch to new field with default desc order
       setSortBy(field)
       setSortOrder('desc')
     }
@@ -225,31 +241,29 @@ export default function SourcesPage() {
     return t.sources.type.text
   }
 
-  const handleRowClick = useCallback((index: number, sourceId: string) => {
-    setSelectedIndex(index)
-    router.push(`/sources/${sourceId}`)
-  }, [router])
-
   const handleDeleteClick = useCallback((e: React.MouseEvent, source: SourceListResponse) => {
-    e.stopPropagation() // Prevent row click
+    e.stopPropagation()
     setDeleteDialog({ open: true, source })
   }, [])
 
   const handleDeleteConfirm = async () => {
     if (!deleteDialog.source) return
-
     try {
       await sourcesApi.delete(deleteDialog.source.id)
       toast.success(t.sources.deleteSuccess)
-      // Remove the deleted source from the list
-      setSources(prev => prev.filter(s => s.id !== deleteDialog.source?.id))
+      const deletedId = deleteDialog.source.id
+      setNotebookGroups((prev) =>
+        prev.map((g) => ({ ...g, sources: g.sources.filter((s) => s.id !== deletedId) }))
+      )
       setDeleteDialog({ open: false, source: null })
     } catch (err: unknown) {
-      const error = err as { response?: { data?: { detail?: string } }, message?: string };
+      const error = err as { response?: { data?: { detail?: string } }; message?: string }
       console.error('Failed to delete source:', error)
       toast.error(t(getApiErrorKey(error.response?.data?.detail || error.message)))
     }
   }
+
+  // ---------- Render guards ----------
 
   if (loading) {
     return (
@@ -271,7 +285,7 @@ export default function SourcesPage() {
     )
   }
 
-  if (sources.length === 0) {
+  if (notebookGroups.length === 0) {
     return (
       <AppShell>
         <EmptyState
@@ -283,14 +297,14 @@ export default function SourcesPage() {
     )
   }
 
+  // ---------- Main render ----------
+
   return (
     <AppShell>
       <div className="flex flex-col h-full w-full max-w-none px-6 py-6">
         <div className="mb-6 flex-shrink-0">
           <h1 className="text-3xl font-bold">{t.sources.allSources}</h1>
-          <p className="mt-2 text-muted-foreground">
-            {t.sources.allSourcesDesc}
-          </p>
+          <p className="mt-2 text-muted-foreground">{t.sources.allSourcesDesc}</p>
         </div>
 
         <div ref={scrollContainerRef} className="flex-1 rounded-md border overflow-auto">
@@ -300,20 +314,13 @@ export default function SourcesPage() {
             className="w-full min-w-[800px] outline-none table-fixed"
           >
             <colgroup>
-              <col className="w-[120px]" />
               <col className="w-auto" />
               <col className="w-[140px]" />
-              <col className="w-[100px]" />
-              <col className="w-[100px]" />
               <col className="w-[100px]" />
             </colgroup>
             <thead className="sticky top-0 bg-background z-10">
               <tr className="border-b bg-muted/50">
                 <th className="h-12 px-4 text-left align-middle font-medium text-muted-foreground">
-                  {t.common.type}
-                </th>
-                <th className="h-12 px-4 text-left align-middle font-medium text-muted-foreground">
-                  {t.common.title}
                 </th>
                 <th className="h-12 px-4 text-left align-middle font-medium text-muted-foreground hidden sm:table-cell">
                   <Button
@@ -323,22 +330,16 @@ export default function SourcesPage() {
                     className="h-8 px-2 hover:bg-muted"
                   >
                     {t.common.created_label}
-                    <ArrowUpDown className={cn(
-                      "ml-2 h-3 w-3",
-                      sortBy === 'created' ? 'opacity-100' : 'opacity-30'
-                    )} />
+                    <ArrowUpDown
+                      className={cn(
+                        'ml-2 h-3 w-3',
+                        sortBy === 'created' ? 'opacity-100' : 'opacity-30'
+                      )}
+                    />
                     {sortBy === 'created' && (
-                      <span className="ml-1 text-xs">
-                        {sortOrder === 'asc' ? '↑' : '↓'}
-                      </span>
+                      <span className="ml-1 text-xs">{sortOrder === 'asc' ? '↑' : '↓'}</span>
                     )}
                   </Button>
-                </th>
-                <th className="h-12 px-4 text-center align-middle font-medium text-muted-foreground hidden md:table-cell">
-                  {t.sources.insights}
-                </th>
-                <th className="h-12 px-4 text-center align-middle font-medium text-muted-foreground hidden lg:table-cell">
-                  {t.sources.embedded}
                 </th>
                 <th className="h-12 px-4 text-right align-middle font-medium text-muted-foreground">
                   {t.common.actions}
@@ -346,74 +347,112 @@ export default function SourcesPage() {
               </tr>
             </thead>
             <tbody>
-              {sources.map((source, index) => (
-                <tr
-                  key={source.id}
-                  onClick={() => handleRowClick(index, source.id)}
-                  onMouseEnter={() => setSelectedIndex(index)}
-                  className={cn(
-                    "border-b transition-colors cursor-pointer",
-                    selectedIndex === index
-                      ? "bg-accent"
-                      : "hover:bg-muted/50"
-                  )}
-                >
-                  <td className="h-12 px-4">
-                    <div className="flex items-center gap-2">
-                      {getSourceIcon(source)}
-                      <Badge variant="secondary" className="text-xs">
-                        {getSourceType(source)}
-                      </Badge>
-                    </div>
-                  </td>
-                  <td className="h-12 px-4">
-                    <div className="flex flex-col overflow-hidden">
-                      <span className="font-medium truncate">
-                        {source.title || t.sources.untitledSource}
-                      </span>
-                      {source.asset?.url && (
-                        <span className="text-xs text-muted-foreground truncate">
-                          {source.asset.url}
-                        </span>
+              {visibleItems.map((item, index) => {
+                const isSelected = selectedIndex === index
+
+                if (item.type === 'folder') {
+                  const group = notebookGroups.find((g) => g.notebook.id === item.notebookId)!
+                  const isExpanded = expandedFolders.has(item.notebookId)
+
+                  return (
+                    <tr
+                      key={`folder-${item.notebookId}`}
+                      onClick={() => {
+                        setSelectedIndex(index)
+                        toggleFolder(item.notebookId)
+                      }}
+                      onMouseEnter={() => setSelectedIndex(index)}
+                      className={cn(
+                        'border-b transition-colors cursor-pointer select-none',
+                        isSelected ? 'bg-accent' : 'bg-muted/10 hover:bg-muted/30'
                       )}
-                    </div>
-                  </td>
-                  <td className="h-12 px-4 text-muted-foreground text-sm hidden sm:table-cell">
-                    {formatDistanceToNow(new Date(source.created), { 
-                      addSuffix: true,
-                      locale: getDateLocale(language)
-                    })}
-                  </td>
-                  <td className="h-12 px-4 text-center hidden md:table-cell">
-                    <span className="text-sm font-medium">{source.insights_count || 0}</span>
-                  </td>
-                  <td className="h-12 px-4 text-center hidden lg:table-cell">
-                    <Badge variant={source.embedded ? "default" : "secondary"} className="text-xs">
-                      {source.embedded ? t.sources.yes : t.sources.no}
-                    </Badge>
-                  </td>
-                  <td className="h-12 px-4 text-right">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={(e) => handleDeleteClick(e, source)}
-                      className="text-destructive hover:text-destructive"
                     >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-              {loadingMore && (
-                <tr>
-                  <td colSpan={6} className="h-16 text-center">
-                    <div className="flex items-center justify-center">
-                      <LoadingSpinner />
-                      <span className="ml-2 text-muted-foreground">{t.sources.loadingMore}</span>
-                    </div>
-                  </td>
-                </tr>
-              )}
+                      <td colSpan={3} className="h-12 px-4">
+                        <div className="flex items-center gap-2">
+                          <span className="text-muted-foreground">
+                            {isExpanded ? (
+                              <ChevronDown className="h-4 w-4" />
+                            ) : (
+                              <ChevronRight className="h-4 w-4" />
+                            )}
+                          </span>
+                          {isExpanded ? (
+                            <FolderOpen className="h-5 w-5 text-primary" />
+                          ) : (
+                            <Folder className="h-5 w-5 text-primary" />
+                          )}
+                          <span className="font-semibold">{group.notebook.name}</span>
+                          <Badge variant="secondary" className="ml-2 text-xs">
+                            {group.notebook.source_count}
+                          </Badge>
+                          {group.loading && <LoadingSpinner className="h-3 w-3 ml-2" />}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                }
+
+                const { source } = item
+                const sourceTypeLabel = getSourceType(source)
+
+                return (
+                  <tr
+                    key={`file-${source.id}`}
+                    onClick={() => {
+                      setSelectedIndex(index)
+                      router.push(`/sources/${source.id}`)
+                    }}
+                    onMouseEnter={() => setSelectedIndex(index)}
+                    className={cn(
+                      'border-b transition-colors cursor-pointer',
+                      isSelected ? 'bg-accent' : 'hover:bg-muted/50'
+                    )}
+                  >
+                    <td className="h-12 px-4 pl-12">
+                      <div className="flex flex-col w-full min-w-0 overflow-hidden">
+                        {/* Title and Icon Row */}
+                        <div className="flex items-center gap-3">
+                          <span className="font-medium truncate">
+                            {source.title || t.sources.untitledSource}
+                          </span>
+                          <span
+                            className="shrink-0 text-muted-foreground flex items-center"
+                            title={sourceTypeLabel}
+                            aria-label={sourceTypeLabel}
+                          >
+                            {getSourceIcon(source)}
+                          </span>
+                        </div>
+
+                        {/* URL Row (if exists) */}
+                        {source.asset?.url && (
+                          <span className="text-xs text-muted-foreground truncate mt-0.5">
+                            {source.asset.url}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+
+                    <td className="h-12 px-4 text-muted-foreground text-sm hidden sm:table-cell">
+                      {formatDistanceToNow(new Date(source.created), {
+                        addSuffix: true,
+                        locale: getDateLocale(language),
+                      })}
+                    </td>
+
+                    <td className="h-12 px-4 text-right">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={(e) => handleDeleteClick(e, source)}
+                        className="text-muted-foreground hover:text-destructive"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -423,7 +462,10 @@ export default function SourcesPage() {
         open={deleteDialog.open}
         onOpenChange={(open) => setDeleteDialog({ open, source: deleteDialog.source })}
         title={t.sources.delete}
-        description={t.sources.deleteConfirmWithTitle.replace('{title}', deleteDialog.source?.title || t.sources.untitledSource)}
+        description={t.sources.deleteConfirmWithTitle?.replace(
+          '{title}',
+          deleteDialog.source?.title || t.sources.untitledSource
+        )}
         confirmText={t.common.delete}
         confirmVariant="destructive"
         onConfirm={handleDeleteConfirm}
