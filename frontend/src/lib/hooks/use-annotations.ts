@@ -43,27 +43,12 @@ export function useCreateAnnotation(sourceId: string) {
 
 export function useUpdateAnnotation(sourceId: string) {
   const queryClient = useQueryClient()
-  const { toast } = useToast()
-  const { t } = useTranslation()
 
   return useMutation({
-    mutationFn: ({ annotationId, data }: { annotationId: string; data: Partial<AnnotationCreate> }) =>
-      annotationsApi.update(annotationId, data),
-    onSuccess: (_, variables) => {
-      // Invalidate both the specific annotation and the list
-      queryClient.invalidateQueries({
-        queryKey: QUERY_KEYS.annotation(variables.annotationId),
-      })
-      queryClient.invalidateQueries({
-        queryKey: QUERY_KEYS.annotations(sourceId),
-      })
-    },
-    onError: (error: unknown) => {
-      toast({
-        title: t.common.error,
-        description: getApiErrorMessage(error),
-        variant: 'destructive',
-      })
+    mutationFn: (data: { id: string; comment?: string; bounding_boxes?: any[] }) =>
+      annotationsApi.update(data.id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: QUERY_KEYS.annotations(sourceId) })
     },
   })
 }

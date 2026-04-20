@@ -1,17 +1,17 @@
 'use client'
 
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import '@/lib/pdf-polyfills'
 import { Document, Page } from 'react-pdf'
 import { Loader2, FileX } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { PdfToolbar } from './PdfToolbar'
 import { AnnotationOverlay } from './AnnotationOverlay'
-import { AnnotationPopup } from './AnnotationPopup'
 import {
   useAnnotations,
-  useClearAnnotations,
   useCreateAnnotation,
+  useDeleteAnnotation,
+  useUpdateAnnotation,
 } from '@/lib/hooks/use-annotations'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { createMockPdfBytes, getPdfUrl } from '@/lib/utils/pdf'
@@ -24,14 +24,7 @@ interface PdfViewerProps {
   sourceId: string
 }
 
-type AnnotationTool = 'highlight' | 'underline' | 'note'
-
-interface SelectionState {
-  text: string
-  pageNumber: number
-  boundingBoxes: Array<{ x1: number; y1: number; x2: number; y2: number }>
-  popupPosition: { x: number; y: number }
-}
+type AnnotationTool = 'highlight' | 'underline' | 'note' | 'eraser'
 
 export function PdfViewer({ sourceId }: PdfViewerProps) {
   const { t } = useTranslation()
@@ -41,43 +34,41 @@ export function PdfViewer({ sourceId }: PdfViewerProps) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [activeTool, setActiveTool] = useState<AnnotationTool>('highlight')
-  const [selection, setSelection] = useState<SelectionState | null>(null)
+  const [activeColor, setActiveColor] = useState('#fef08a')
   const pageRefs = useRef<Record<number, HTMLDivElement | null>>({})
 
   const { data: annotationsData } = useAnnotations(sourceId)
   const createAnnotation = useCreateAnnotation(sourceId)
-  const clearAnnotations = useClearAnnotations(sourceId)
+  const deleteAnnotation = useDeleteAnnotation(sourceId)
+  const updateAnnotation = useUpdateAnnotation(sourceId) // added
   const annotations = Array.isArray(annotationsData) ? annotationsData : []
-  const pageLabel = t.pdfReader.pageOf
-    .replace('{page}', String(currentPage))
-    .replace('{total}', String(numPages || 0))
+
+  const pageLabel = useMemo(() => {
+    if (!t.pdfReader?.pageOf) return `${currentPage} / ${numPages || 0}`
+    return t.pdfReader.pageOf
+      .replace('{page}', String(currentPage))
+      .replace('{total}', String(numPages || 0))
+  }, [currentPage, numPages, t.pdfReader?.pageOf])
 
   const pdfFile = useMemo(() => {
     if (process.env.NEXT_PUBLIC_MOCK_API === 'true') {
-      return {
-        data: createMockPdfBytes(sourceId),
-      }
+      return { data: createMockPdfBytes(sourceId) }
     }
-
     const file: { url: string; httpHeaders?: Record<string, string> } = {
       url: getPdfUrl(sourceId),
     }
-
     if (typeof window !== 'undefined') {
       const authStorage = localStorage.getItem('auth-storage')
       if (authStorage) {
         try {
           const parsed = JSON.parse(authStorage)
           const token = parsed?.state?.token
-          if (token) {
-            file.httpHeaders = { Authorization: `Bearer ${token}` }
-          }
+          if (token) file.httpHeaders = { Authorization: `Bearer ${token}` }
         } catch {
-          // No-op: reader still works for non-protected endpoints.
+          // no-op
         }
       }
     }
-
     return file
   }, [sourceId])
 
@@ -97,41 +88,42 @@ export function PdfViewer({ sourceId }: PdfViewerProps) {
     if (!numPages) return
     const targetPage = Math.max(1, Math.min(page, numPages))
     setCurrentPage(targetPage)
-
-    const pageEl = pageRefs.current[targetPage]
-    if (pageEl) {
-      pageEl.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
+    pageRefs.current[targetPage]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
   const handleZoomIn = () => setZoom(prev => Math.min(prev + 0.25, 3))
   const handleZoomOut = () => setZoom(prev => Math.max(prev - 0.25, 0.5))
 
-  const handleSelection = (pageNumber: number, container: HTMLDivElement) => {
-    const selectionObj = window.getSelection()
-    if (!selectionObj || selectionObj.rangeCount === 0) {
-      return
+  useEffect(() => {
+    const container = document.getElementById('pdf-scroll-container')
+    if (!container) return
+    const handleWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return
+      e.preventDefault()
+      setZoom(prev =>
+        e.deltaY < 0 ? Math.min(prev + 0.1, 3) : Math.max(prev - 0.1, 0.5)
+      )
     }
+    container.addEventListener('wheel', handleWheel, { passive: false })
+    return () => container.removeEventListener('wheel', handleWheel)
+  }, [])
+
+  // Highlight/underline saves instantly on mouse up — no popup
+  const handleSelection = (pageNumber: number, container: HTMLDivElement) => {
+    if (activeTool === 'eraser' || activeTool === 'note') return
+
+    const selectionObj = window.getSelection()
+    if (!selectionObj || selectionObj.rangeCount === 0) return
 
     const selectedText = selectionObj.toString().trim()
-    if (!selectedText) {
-      setSelection(null)
-      return
-    }
+    if (!selectedText) return
 
     const range = selectionObj.getRangeAt(0)
-    if (!container.contains(range.commonAncestorContainer)) {
-      return
-    }
+    if (!container.contains(range.commonAncestorContainer)) return
 
     const pageRect = container.getBoundingClientRect()
-    const rects = Array.from(range.getClientRects()).filter(
-      rect => rect.width > 0 && rect.height > 0
-    )
-
-    if (rects.length === 0 || pageRect.width === 0 || pageRect.height === 0) {
-      return
-    }
+    const rects = Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0)
+    if (rects.length === 0 || pageRect.width === 0 || pageRect.height === 0) return
 
     const boundingBoxes = rects.map(rect => ({
       x1: (rect.left - pageRect.left) / pageRect.width,
@@ -140,50 +132,83 @@ export function PdfViewer({ sourceId }: PdfViewerProps) {
       y2: (rect.bottom - pageRect.top) / pageRect.height,
     }))
 
-    const anchorRect = rects[0]
-    setSelection({
-      text: selectedText,
-      pageNumber,
-      boundingBoxes,
-      popupPosition: {
-        x: Math.max(120, Math.min(window.innerWidth - 120, anchorRect.left + anchorRect.width / 2)),
-        y: Math.max(80, Math.min(window.innerHeight - 40, anchorRect.bottom + 12)),
-      },
-    })
-
     selectionObj.removeAllRanges()
-  }
 
-  const handleCreateAnnotation = async (comment?: string) => {
-    if (!selection || createAnnotation.isPending) return
-
-    const annotation: AnnotationCreate = {
-      page_number: selection.pageNumber,
+    // Instant save — no popup
+    createAnnotation.mutate({
+      page_number: pageNumber,
       annotation_type: activeTool,
-      selected_text: selection.text,
-      bounding_boxes: selection.boundingBoxes,
-      color: activeTool === 'highlight' ? '#fef08a' : undefined,
-      comment,
-    }
-
-    await createAnnotation.mutateAsync(annotation)
-    setSelection(null)
+      selected_text: selectedText,
+      bounding_boxes: boundingBoxes,
+      color: activeColor,
+      comment: undefined,
+    })
   }
 
-  const handleClearAll = async () => {
-    await clearAnnotations.mutateAsync()
-    setSelection(null)
+  // Click anywhere on page to drop a sticky note
+  const handleNoteClick = async (
+    position: { x: number; y: number },
+    pageNumber: number
+  ) => {
+    await createAnnotation.mutateAsync({
+      page_number: pageNumber,
+      annotation_type: 'note',
+      selected_text: '',
+      bounding_boxes: [{
+        x1: position.x,
+        y1: position.y,
+        x2: position.x + 0.15,
+        y2: position.y + 0.1,
+      }],
+      color: activeColor,
+      comment: '',
+    })
   }
 
-  const clearSelection = () => {
-    setSelection(null)
+  // Save edited note text
+  const handleUpdateNote = async (id: string, comment: string) => {
+    await updateAnnotation.mutateAsync({ id, comment })
+  }
+
+  // Drag note to new position
+  const handleMoveNote = async (id: string, x: number, y: number) => {
+    const ann = annotations.find(a => a.id === id)
+    if (!ann) return
+    const box = ann.bounding_boxes[0]
+    const w = box.x2 - box.x1
+    const h = box.y2 - box.y1
+    await updateAnnotation.mutateAsync({
+      id,
+      bounding_boxes: [{ x1: x, y1: y, x2: x + w, y2: y + h }],
+    })
+  }
+
+  // Opens an inline edit for attaching a comment to a highlight/underline
+  const [attachingId, setAttachingId] = useState<string | null>(null)
+  const [attachText, setAttachText] = useState('')
+
+  const handleAttachNote = (id: string) => {
+    const ann = annotations.find(a => a.id === id)
+    setAttachingId(id)
+    setAttachText(ann?.comment || '')
+  }
+
+  const handleSaveAttachedNote = async () => {
+    if (!attachingId) return
+    await updateAnnotation.mutateAsync({ id: attachingId, comment: attachText })
+    setAttachingId(null)
+    setAttachText('')
+  }
+
+  const handleDeleteAnnotation = async (id: string) => {
+    await deleteAnnotation.mutateAsync(id)
   }
 
   if (error) {
     return (
-      <div className="flex flex-col items-center justify-center h-full p-8">
-        <FileX className="h-12 w-12 text-muted-foreground mb-4" />
-        <p className="text-muted-foreground">{error}</p>
+      <div className="flex flex-col items-center justify-center h-full gap-2">
+        <FileX size={40} className="text-muted-foreground" />
+        <p>{error}</p>
         <Button onClick={() => window.location.reload()} className="mt-4">
           {t.pdfReader.tryAgain}
         </Button>
@@ -198,26 +223,28 @@ export function PdfViewer({ sourceId }: PdfViewerProps) {
         numPages={numPages}
         zoom={zoom}
         activeTool={activeTool}
+        activeColor={activeColor}
+        onToolChange={setActiveTool}
+        onColorChange={setActiveColor}
         onZoomIn={handleZoomIn}
         onZoomOut={handleZoomOut}
-        onToolChange={setActiveTool}
-        onClearAll={handleClearAll}
-        isClearing={clearAnnotations.isPending}
       />
 
-      <div className="flex-1 overflow-auto relative bg-gray-100 p-4">
+      <div
+        id="pdf-scroll-container"
+        className="flex-1 overflow-auto bg-muted/30 p-4 pl-2 flex flex-col items-center"
+      >
         {loading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-white/80 z-50">
-            <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+          <div className="flex justify-center py-10">
+            <Loader2 className="animate-spin" />
           </div>
         )}
 
         <Document
           file={pdfFile}
-          loading={<div className="flex items-center justify-center h-full"><Loader2 className="h-8 w-8 animate-spin text-gray-400" /></div>}
           onLoadSuccess={onDocumentLoadSuccess}
           onLoadError={onDocumentLoadError}
-          error={<div className="flex items-center justify-center h-full text-red-500">{t.pdfReader.loadError}</div>}
+          error={<span>{t.pdfReader.loadError}</span>}
         >
           {Array.from({ length: numPages || 0 }, (_, index) => {
             const pageNumber = index + 1
@@ -225,43 +252,41 @@ export function PdfViewer({ sourceId }: PdfViewerProps) {
 
             return (
               <div
-                key={`page-${pageNumber}`}
-                className="flex justify-center mb-4"
-                ref={node => {
-                  pageRefs.current[pageNumber] = node
-                }}
+                key={pageNumber}
+                ref={node => { pageRefs.current[pageNumber] = node }}
+                className="relative mb-4 shadow-md"
+                onMouseUp={event => handleSelection(pageNumber, event.currentTarget)}
               >
-                <div
-                  className="relative inline-block"
-                  onMouseUp={event => handleSelection(pageNumber, event.currentTarget)}
-                >
-                  <Page
-                    pageNumber={pageNumber}
-                    scale={zoom}
-                    renderTextLayer={true}
-                    renderAnnotationLayer={false}
-                    className="shadow-lg"
-                  />
-                  <AnnotationOverlay annotations={pageAnnotations} />
-                </div>
+                <Page
+                  pageNumber={pageNumber}
+                  scale={zoom}
+                  onRenderSuccess={() => {
+                    const canvas = pageRefs.current[pageNumber]?.querySelector('canvas')
+                    if (canvas && pageRefs.current[pageNumber]) {
+                      pageRefs.current[pageNumber]!.style.width = `${canvas.offsetWidth}px`
+                      pageRefs.current[pageNumber]!.style.height = `${canvas.offsetHeight}px`
+                    }
+                  }}
+                />
+                { }
+                <AnnotationOverlay
+                  annotations={pageAnnotations}
+                  activeTool={activeTool}
+                  onDelete={handleDeleteAnnotation}
+                  onNoteClick={handleNoteClick}
+                  onUpdateNote={handleUpdateNote}
+                  onMoveNote={handleMoveNote}
+                  onAttachNote={handleAttachNote}
+                  pageNumber={pageNumber}
+                />
               </div>
             )
           })}
         </Document>
-
-        <AnnotationPopup
-          open={!!selection}
-          tool={activeTool}
-          selectedText={selection?.text || ''}
-          position={selection?.popupPosition}
-          isSaving={createAnnotation.isPending}
-          onCancel={clearSelection}
-          onConfirm={handleCreateAnnotation}
-        />
       </div>
 
       {/* Page Navigation */}
-      <div className="flex justify-between items-center px-4 py-2 border-t bg-background">
+      <div className="flex items-center justify-center gap-2 py-2 border-t">
         <Button
           variant="ghost"
           size="sm"
@@ -270,9 +295,7 @@ export function PdfViewer({ sourceId }: PdfViewerProps) {
         >
           {t.pdfReader.previous}
         </Button>
-        <span className="text-sm text-muted-foreground">
-          {pageLabel}
-        </span>
+        <span className="text-sm">{pageLabel}</span>
         <Button
           variant="ghost"
           size="sm"
@@ -282,6 +305,23 @@ export function PdfViewer({ sourceId }: PdfViewerProps) {
           {t.pdfReader.next}
         </Button>
       </div>
+      {attachingId && (
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 bg-white dark:bg-zinc-900 border shadow-xl rounded-lg p-3 w-72">
+          <p className="text-xs text-muted-foreground mb-2">Add note to annotation</p>
+          <textarea
+            autoFocus
+            value={attachText}
+            onChange={e => setAttachText(e.target.value)}
+            className="w-full text-sm border rounded p-2 resize-none outline-none focus:ring-1 focus:ring-primary min-h-[60px]"
+            placeholder="Type your note…"
+            rows={3}
+          />
+          <div className="flex justify-end gap-2 mt-2">
+            <Button variant="ghost" size="sm" onClick={() => setAttachingId(null)}>Cancel</Button>
+            <Button size="sm" onClick={handleSaveAttachedNote}>Save</Button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
