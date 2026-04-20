@@ -230,9 +230,11 @@ export function PdfViewer({ sourceId }: PdfViewerProps) {
                 ref={node => {
                   pageRefs.current[pageNumber] = node
                 }}
-                onMouseUp={event => handleSelection(pageNumber, event.currentTarget)}
               >
-                <div className="relative inline-block">
+                <div
+                  className="relative inline-block"
+                  onMouseUp={event => handleSelection(pageNumber, event.currentTarget)}
+                >
                   <Page
                     pageNumber={pageNumber}
                     scale={zoom}
