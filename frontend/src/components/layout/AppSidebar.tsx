@@ -125,7 +125,7 @@ export function AppSidebar() {
                 alt="Open Notebook"
                 width={32}
                 height={32}
-                className="transition-opacity group-hover:opacity-0"
+                className="transition-opacity group-hover:opacity-0 w-auto h-8"
               />
               <Button
                 variant="ghost"
@@ -140,7 +140,7 @@ export function AppSidebar() {
             <>
               <div className="flex items-center gap-2">
                 <Image src="/logo.svg" alt={t.common.appName} width={32} height={32} />
-                <span className="text-base font-medium text-sidebar-foreground">
+                <span className="text-base font-medium text-sidebar-foreground w-auto">
                   {t.common.appName}
                 </span>
               </div>
