@@ -57,17 +57,17 @@ export function NotebookHeader({ notebook }: NotebookHeaderProps) {
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className=" flex text-primary w-8 mr-4 hover:bg-accent transition-colors"
-                  onClick={() => router.push('/notebooks')}
-                  type="button"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-                  </svg>
-                </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className=" flex text-primary w-8 mr-4 hover:bg-accent transition-colors"
+                onClick={() => router.push('/notebooks')}
+                type="button"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+                </svg>
+              </Button>
             </div>
             <div className="flex items-center gap-3 flex-1">
               <InlineEdit
@@ -88,7 +88,7 @@ export function NotebookHeader({ notebook }: NotebookHeaderProps) {
                 <Button
                   variant="outline"
                   size="sm"
-                  className="bg-primary/10 text-primary hover:bg-primary hover:text-white"
+                  className="bg-primary/10 text-primary dark:hover:bg-primary dark:hover:text-white"
                 >
                   <Network className="h-4 w-4 mr-2" />
                   Knowledge Map
@@ -115,7 +115,7 @@ export function NotebookHeader({ notebook }: NotebookHeaderProps) {
                 variant="outline"
                 size="sm"
                 onClick={() => setShowDeleteDialog(true)}
-                className="text-red-600 hover:text-white"
+                className="text-red-600 dark:hover:bg-red-600 dark:hover:text-white"
               >
                 <Trash2 className="h-4 w-4 mr-2" />
                 {t.common.delete}
